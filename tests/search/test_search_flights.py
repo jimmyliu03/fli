@@ -325,3 +325,53 @@ class TestParsePriceInfo:
             ],
         ]
         assert SearchFlights._parse_price_info(data) == (118.0, "USD")
+
+
+class TestEmptyResponseDiagnostics:
+    """Tests for the empty-payload diagnostic helpers."""
+
+    def test_extract_proto_type_marker_finds_error_response(self):
+        from fli.search.flights import _extract_proto_type_marker
+
+        body = (
+            ")]}'\n\n[[\"wrb.fr\",null,null,null,null,[13,null,["
+            "[\"type.googleapis.com/travel.frontend.flights.ErrorResponse\","
+            "[[null,[[0,0,0],null,null,null,null,[[0]]],0,\"abc\"],0]]]]]]"
+        )
+        assert (
+            _extract_proto_type_marker(body)
+            == "type.googleapis.com/travel.frontend.flights.ErrorResponse"
+        )
+
+    def test_extract_proto_type_marker_none_when_absent(self):
+        from fli.search.flights import _extract_proto_type_marker
+
+        assert _extract_proto_type_marker(")]}'\n\n[[\"wrb.fr\",null]]") is None
+        assert _extract_proto_type_marker("") is None
+        assert _extract_proto_type_marker("<html>captcha</html>") is None
+
+    def test_describe_json_shape_list_first_items(self):
+        from fli.search.flights import _describe_json_shape
+
+        assert _describe_json_shape([1, "x", None, True, {}]).startswith("list[5](")
+        assert _describe_json_shape([]) == "list[0]"
+
+    def test_describe_json_shape_scalars(self):
+        from fli.search.flights import _describe_json_shape
+
+        assert _describe_json_shape(None) == "null"
+        assert _describe_json_shape(True) == "bool"
+        assert _describe_json_shape(3.14) == "number"
+        assert _describe_json_shape("hello") == "str(len=5)"
+
+    def test_parse_inner_payload_returns_none_on_shape_mismatch(self):
+        assert SearchFlights._parse_inner_payload(")]}'\n[]") is None
+        assert SearchFlights._parse_inner_payload(")]}'\n[[]]") is None
+        assert SearchFlights._parse_inner_payload("<html>") is None
+
+    def test_parse_inner_payload_returns_none_when_inner_null(self):
+        assert SearchFlights._parse_inner_payload(")]}'\n[[\"a\", null, null]]") is None
+
+    def test_parse_inner_payload_returns_string_when_present(self):
+        raw = ")]}'\n[[\"a\", null, \"[1,2,3]\"]]"
+        assert SearchFlights._parse_inner_payload(raw) == "[1,2,3]"
