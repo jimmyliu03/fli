@@ -37,17 +37,27 @@ class SearchFlights:
         self.client = get_client()
 
     def search(
-        self, filters: FlightSearchFilters, top_n: int = 5
+        self,
+        filters: FlightSearchFilters,
+        top_n: int = 5,
+        return_combined_only: bool = False,
     ) -> list[FlightResult | tuple[FlightResult, ...]] | None:
         """Search for flights using the given FlightSearchFilters.
 
         Args:
             filters: Full flight search object including airports, dates, and preferences
             top_n: Number of flights to limit the return flight search to
+            return_combined_only: If True, for round-trip/multi-city searches with no
+                ``selected_flight`` on any segment, return the initial outbound list
+                without recursing into per-outbound return fetches. Each outbound's
+                ``price`` is Google's cheapest-combined round-trip price (matches the
+                Google Flights UI outbound list). Default False preserves the original
+                recursive behavior that yields ``(outbound, return)`` tuples.
 
         Returns:
-            List of FlightResult objects (one-way), tuples of FlightResult (round-trip
-            or multi-city), or None if no results
+            List of FlightResult objects (one-way, or round-trip outbound list when
+            ``return_combined_only`` is True), tuples of FlightResult (round-trip or
+            multi-city), or None if no results
 
         Raises:
             Exception: If the search fails or returns invalid data
@@ -94,6 +104,11 @@ class SearchFlights:
 
             # If all previous segments are selected, we're on the last leg
             if selected_count >= num_segments - 1:
+                return flights
+
+            # Caller wants the initial outbound list with Google's cheapest-combined
+            # round-trip prices, without recursing into per-outbound return fetches.
+            if return_combined_only and selected_count == 0:
                 return flights
 
             # Select each flight option and fetch the next leg

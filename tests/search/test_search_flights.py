@@ -1,6 +1,7 @@
 """Tests for Search class."""
 
 from datetime import datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 import pytest
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -191,6 +192,74 @@ def test_multiple_searches(search, basic_search_params, complex_search_params):
 # def test_complex_round_trip_search(search, complex_round_trip_params):
 # def test_round_trip_with_selected_outbound(search, round_trip_search_params):
 # def test_round_trip_result_structure(search, search_params_fixture, request):
+
+
+class TestReturnCombinedOnly:
+    """Tests for the ``return_combined_only`` flag on round-trip searches."""
+
+    @staticmethod
+    def _flight_result(price: float):
+        """Build a minimal FlightResult stand-in for parser output."""
+        return MagicMock(price=price)
+
+    @staticmethod
+    def _patched_search(flights: list):
+        """Return a context manager that makes the initial HTTP/parse pipeline
+        yield ``flights`` as the parsed first-response flight list.
+
+        Mocks ``client.post``, the two ``json.loads`` calls, and
+        ``_parse_flights_data`` so the test never hits the network. The second
+        ``json.loads`` return pads to length 4 so the ``[2, 3]`` index scan
+        finds exactly one list (index 2) and skips index 3.
+        """
+        search = SearchFlights()
+        response = MagicMock()
+        response.text = ")]}'\n[]"
+        markers = [[f"marker_{i}"] for i in range(len(flights))]
+        return (
+            search,
+            patch.object(search.client, "post", return_value=response),
+            patch(
+                "fli.search.flights.json.loads",
+                side_effect=[
+                    [[None, None, "encoded"]],
+                    [None, None, [markers], None],
+                ],
+            ),
+            patch.object(
+                SearchFlights, "_parse_flights_data", side_effect=flights
+            ),
+        )
+
+    def test_round_trip_returns_outbound_list_when_flag_set(
+        self, round_trip_search_params
+    ):
+        """With ``return_combined_only=True``, round-trip search skips recursion."""
+        outbound_flights = [
+            self._flight_result(500.0),
+            self._flight_result(600.0),
+            self._flight_result(700.0),
+        ]
+        search, client_patch, json_patch, parse_patch = self._patched_search(
+            outbound_flights
+        )
+        with client_patch, json_patch, parse_patch:
+            results = search.search(
+                round_trip_search_params, return_combined_only=True
+            )
+        assert results == outbound_flights
+        # Flat list of outbounds, not (outbound, return) tuples.
+        assert all(not isinstance(r, tuple) for r in results)
+
+    def test_one_way_ignores_flag(self, basic_search_params):
+        """``return_combined_only`` is a no-op for one-way searches."""
+        one_way_flights = [self._flight_result(250.0)]
+        search, client_patch, json_patch, parse_patch = self._patched_search(
+            one_way_flights
+        )
+        with client_patch, json_patch, parse_patch:
+            results = search.search(basic_search_params, return_combined_only=True)
+        assert results == one_way_flights
 
 
 class TestParsePriceInfo:
