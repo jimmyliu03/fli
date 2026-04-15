@@ -23,11 +23,39 @@ class Client:
     DEFAULT_HEADERS = {
         "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
     }
+    WARMUP_URL = "https://www.google.com/travel/flights"
+    WARMUP_TIMEOUT_SECONDS = 10
 
     def __init__(self):
-        """Initialize a new client session with default headers."""
+        """Initialize a new client session with default headers.
+
+        Issues a single GET to ``WARMUP_URL`` so the session picks up Google's
+        ``NID`` cookie before any shopping POST. Without this, Google's
+        ``GetShoppingResults`` endpoint intermittently serves an empty
+        payload for unauthenticated callers — particularly on cold
+        serverless workers where the session has no cookie state. Failure
+        to warm up is non-fatal; the real POST will still be attempted.
+        """
         self._client = requests.Session()
         self._client.headers.update(self.DEFAULT_HEADERS)
+        self._warm_up_session()
+
+    def _warm_up_session(self) -> None:
+        """Prime the session with Google's standard browser cookies.
+
+        Any error (DNS, TLS, non-2xx, timeout) is swallowed — the caller's
+        shopping POST will either succeed anyway or surface its own error.
+        """
+        try:
+            self._client.get(
+                self.WARMUP_URL,
+                impersonate="chrome",
+                allow_redirects=True,
+                timeout=self.WARMUP_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            # Non-fatal: proceed without a warmed cookie jar.
+            pass
 
     def __del__(self):
         """Clean up client session on deletion."""
