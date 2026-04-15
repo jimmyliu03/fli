@@ -5,6 +5,7 @@ with Google Flights' API to find available flights and their details.
 """
 
 import json
+import sys
 from copy import deepcopy
 from datetime import datetime
 
@@ -18,6 +19,12 @@ from fli.models import (
 )
 from fli.models.google_flights.base import TripType
 from fli.search.client import get_client
+
+# Google's GetShoppingResults occasionally serves an empty inner payload for
+# unauthenticated callers whose session cookies are missing/expired. When that
+# happens, we re-warm the session and retry up to this many total attempts
+# before giving up.
+_MAX_EMPTY_RESPONSE_RETRIES = 3
 
 
 class SearchFlights:
@@ -71,15 +78,7 @@ class SearchFlights:
         encoded_filters = filters.encode()
 
         try:
-            response = self.client.post(
-                url=self.BASE_URL,
-                data=f"f.req={encoded_filters}",
-                impersonate="chrome",
-                allow_redirects=True,
-            )
-            response.raise_for_status()
-
-            parsed = json.loads(response.text.lstrip(")]}'"))[0][2]
+            parsed = self._post_and_extract_payload(encoded_filters)
             if not parsed:
                 return None
 
@@ -128,6 +127,53 @@ class SearchFlights:
 
         except Exception as e:
             raise Exception(f"Search failed: {str(e)}") from e
+
+    def _post_and_extract_payload(self, encoded_filters: str) -> str | None:
+        """POST the shopping request and return the inner payload string.
+
+        Google's ``GetShoppingResults`` occasionally returns ``null`` at
+        ``response[0][2]`` for callers whose session cookies are missing or
+        expired — even after a successful 2xx. When this happens, re-warm
+        the session and retry up to ``_MAX_EMPTY_RESPONSE_RETRIES`` total
+        attempts. Progress is logged to stderr for observability in
+        serverless logs (Vercel).
+
+        Returns the non-empty inner payload string on success, or ``None``
+        if all retries produced empty payloads.
+        """
+        last_parsed: str | None = None
+        for attempt in range(1, _MAX_EMPTY_RESPONSE_RETRIES + 1):
+            response = self.client.post(
+                url=self.BASE_URL,
+                data=f"f.req={encoded_filters}",
+                impersonate="chrome",
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+            last_parsed = json.loads(response.text.lstrip(")]}'"))[0][2]
+            if last_parsed:
+                if attempt > 1:
+                    print(
+                        f"[fli] shopping POST succeeded on attempt {attempt}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                return last_parsed
+            # Empty payload — re-warm and retry.
+            warmed = self.client.warm_up_session()
+            print(
+                f"[fli] shopping POST returned empty payload on attempt "
+                f"{attempt}/{_MAX_EMPTY_RESPONSE_RETRIES} "
+                f"(re-warm ok={warmed})",
+                file=sys.stderr,
+                flush=True,
+            )
+        print(
+            f"[fli] giving up after {_MAX_EMPTY_RESPONSE_RETRIES} empty payloads",
+            file=sys.stderr,
+            flush=True,
+        )
+        return last_parsed
 
     @staticmethod
     def _parse_flights_data(data: list) -> FlightResult:

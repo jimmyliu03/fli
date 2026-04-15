@@ -38,24 +38,32 @@ class Client:
         """
         self._client = requests.Session()
         self._client.headers.update(self.DEFAULT_HEADERS)
-        self._warm_up_session()
+        self.warm_up_session()
 
-    def _warm_up_session(self) -> None:
+    def warm_up_session(self) -> bool:
         """Prime the session with Google's standard browser cookies.
 
-        Any error (DNS, TLS, non-2xx, timeout) is swallowed — the caller's
-        shopping POST will either succeed anyway or surface its own error.
+        Called automatically during ``__init__``; callers can also invoke
+        it manually to refresh cookies mid-session (e.g. after an empty
+        ``GetShoppingResults`` payload that suggests the cookie jar
+        expired). Any error (DNS, TLS, non-2xx, timeout) is swallowed.
+
+        Returns:
+            ``True`` if the GET completed with a 2xx response, ``False``
+            otherwise. Callers can log the result for observability but
+            should not treat a failure as fatal — the subsequent POST
+            will still be attempted.
         """
         try:
-            self._client.get(
+            resp = self._client.get(
                 self.WARMUP_URL,
                 impersonate="chrome",
                 allow_redirects=True,
                 timeout=self.WARMUP_TIMEOUT_SECONDS,
             )
+            return 200 <= resp.status_code < 300
         except Exception:
-            # Non-fatal: proceed without a warmed cookie jar.
-            pass
+            return False
 
     def __del__(self):
         """Clean up client session on deletion."""
