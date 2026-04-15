@@ -8,6 +8,7 @@ import json
 import sys
 from copy import deepcopy
 from datetime import datetime
+from typing import Any
 
 from fli.core import extract_currency_from_price_token
 from fli.models import (
@@ -25,6 +26,67 @@ from fli.search.client import get_client
 # happens, we re-warm the session and retry up to this many total attempts
 # before giving up.
 _MAX_EMPTY_RESPONSE_RETRIES = 3
+
+# How many characters of the raw response body to include in empty-payload
+# diagnostic logs. Enough to reveal HTML/captcha/redirect pages but not so
+# long that serverless logs get flooded.
+_RAW_BODY_PREVIEW_CHARS = 600
+
+
+def _describe_json_shape(node: Any, _depth: int = 0, _max_depth: int = 3) -> str:
+    """Describe a parsed-JSON structure concisely for diagnostics.
+
+    Lists are rendered as ``list[N](<shape_of_first>, <shape_of_second>, ...)``
+    up to the first 3 items; dicts as ``dict{keys=[...]}``. Strings and
+    scalars show their type only. Depth is capped so deeply nested
+    payloads don't blow up log lines.
+    """
+    if _depth >= _max_depth:
+        return type(node).__name__
+    if node is None:
+        return "null"
+    if isinstance(node, bool):
+        return "bool"
+    if isinstance(node, (int, float)):
+        return "number"
+    if isinstance(node, str):
+        return f"str(len={len(node)})"
+    if isinstance(node, list):
+        if not node:
+            return "list[0]"
+        head = ", ".join(
+            _describe_json_shape(item, _depth + 1, _max_depth) for item in node[:3]
+        )
+        suffix = ", ..." if len(node) > 3 else ""
+        return f"list[{len(node)}]({head}{suffix})"
+    if isinstance(node, dict):
+        keys = list(node.keys())[:5]
+        suffix = ", ..." if len(node) > 5 else ""
+        return f"dict{{keys={keys}{suffix}}}"
+    return type(node).__name__
+
+
+def _extract_proto_type_marker(body: str) -> str | None:
+    """Return the first ``type.googleapis.com/...`` protobuf type URL found.
+
+    Google's batch-execute errors carry the protobuf type URL as a plain
+    string inside the body, e.g.
+    ``type.googleapis.com/travel.frontend.flights.ErrorResponse``. This
+    helper extracts the full type URL (up to the next quote or closing
+    bracket) so operators can see instantly whether the response is an
+    ErrorResponse, a different protobuf shape, or an HTML page without
+    any protobuf marker at all. Returns ``None`` when no marker is present.
+    """
+    marker = "type.googleapis.com/"
+    idx = body.find(marker)
+    if idx < 0:
+        return None
+    end = idx + len(marker)
+    # Type URLs terminate on quote, bracket, comma, whitespace, or backslash.
+    terminators = set('"\',]} \t\n\\')
+    while end < len(body) and body[end] not in terminators:
+        end += 1
+    return body[idx:end]
 
 
 class SearchFlights:
@@ -138,6 +200,12 @@ class SearchFlights:
         attempts. Progress is logged to stderr for observability in
         serverless logs (Vercel).
 
+        On empty payload, a truncated diagnostic of the raw response is
+        logged too — status code, size, a prefix of the body, and the
+        outer JSON shape — so operators can tell whether Google served
+        HTML (captcha), a non-2xx, a valid-but-empty shell, or some other
+        unexpected structure.
+
         Returns the non-empty inner payload string on success, or ``None``
         if all retries produced empty payloads.
         """
@@ -150,7 +218,7 @@ class SearchFlights:
                 allow_redirects=True,
             )
             response.raise_for_status()
-            last_parsed = json.loads(response.text.lstrip(")]}'"))[0][2]
+            last_parsed = self._parse_inner_payload(response.text)
             if last_parsed:
                 if attempt > 1:
                     print(
@@ -159,7 +227,8 @@ class SearchFlights:
                         flush=True,
                     )
                 return last_parsed
-            # Empty payload — re-warm and retry.
+            # Empty payload — dump diagnostics, re-warm, and retry.
+            self._log_empty_response(attempt, response)
             warmed = self.client.warm_up_session()
             print(
                 f"[fli] shopping POST returned empty payload on attempt "
@@ -174,6 +243,69 @@ class SearchFlights:
             flush=True,
         )
         return last_parsed
+
+    @staticmethod
+    def _parse_inner_payload(raw_text: str) -> str | None:
+        """Extract the inner payload string at ``response[0][2]`` if present.
+
+        Returns ``None`` if the outer JSON doesn't have the expected shape
+        (too short, wrong types, etc.). Does not raise — callers
+        distinguish between legitimate empty payloads and structural
+        malformation via the accompanying raw-response log.
+        """
+        try:
+            outer = json.loads(raw_text.lstrip(")]}'"))
+            if isinstance(outer, list) and outer and isinstance(outer[0], list):
+                if len(outer[0]) > 2:
+                    inner = outer[0][2]
+                    return inner if inner else None
+            return None
+        except (ValueError, TypeError, IndexError):
+            return None
+
+    @staticmethod
+    def _log_empty_response(attempt: int, response: Any) -> None:
+        """Dump diagnostics for an empty-payload response to stderr.
+
+        Captures status, body size, a capped prefix of the body, the outer
+        JSON shape (when parseable), and — when the body encodes a
+        protobuf ``type.googleapis.com/...`` marker — the protobuf type
+        name so operators can tell instantly whether Google returned an
+        ``ErrorResponse``, a captcha page, or some other shape. Safe
+        against exceptions: any failure inside the diagnostic itself is
+        logged rather than propagated.
+        """
+        try:
+            body = getattr(response, "text", "") or ""
+            status = getattr(response, "status_code", "?")
+            # Strip the XSSI prefix so the outer JSON is parseable. Keep a
+            # capped prefix of the RAW body for eyeballing (captchas,
+            # redirect pages, etc. never have the XSSI prefix at all).
+            trimmed = body.lstrip(")]}'").lstrip("\n")
+            body_preview = body[:_RAW_BODY_PREVIEW_CHARS]
+            if len(body) > _RAW_BODY_PREVIEW_CHARS:
+                body_preview += f"... [+{len(body) - _RAW_BODY_PREVIEW_CHARS} chars]"
+            shape_desc: str
+            proto_type = _extract_proto_type_marker(body)
+            try:
+                outer = json.loads(trimmed) if trimmed else None
+                shape_desc = _describe_json_shape(outer)
+            except ValueError as parse_err:
+                shape_desc = f"<not JSON: {parse_err}>"
+            print(
+                f"[fli] empty-payload diagnostic (attempt {attempt}): "
+                f"status={status} body_len={len(body)} "
+                f"proto_type={proto_type or '<none>'} "
+                f"outer_shape={shape_desc} body_prefix={body_preview!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[fli] could not dump empty-payload diagnostic: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     @staticmethod
     def _parse_flights_data(data: list) -> FlightResult:
