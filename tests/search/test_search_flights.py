@@ -375,3 +375,64 @@ class TestEmptyResponseDiagnostics:
     def test_parse_inner_payload_returns_string_when_present(self):
         raw = ")]}'\n[[\"a\", null, \"[1,2,3]\"]]"
         assert SearchFlights._parse_inner_payload(raw) == "[1,2,3]"
+
+    def test_is_deterministic_error_response_flags_error_response(self):
+        from fli.search.flights import _is_deterministic_error_response
+
+        body = (
+            '[["wrb.fr",null,null,null,null,[13,null,'
+            '[["type.googleapis.com/travel.frontend.flights.ErrorResponse",[]]]]]]'
+        )
+        assert _is_deterministic_error_response(body) is True
+
+    def test_is_deterministic_error_response_ignores_unknown_protos(self):
+        from fli.search.flights import _is_deterministic_error_response
+
+        body = '"type.googleapis.com/some.other.Type"'
+        assert _is_deterministic_error_response(body) is False
+
+    def test_is_deterministic_error_response_false_when_no_proto(self):
+        from fli.search.flights import _is_deterministic_error_response
+
+        assert _is_deterministic_error_response(")]}'\n[[\"wrb.fr\"]]") is False
+        assert _is_deterministic_error_response("") is False
+
+
+class TestFailFastOnErrorResponse:
+    """Empty responses carrying an ErrorResponse proto should not retry."""
+
+    @staticmethod
+    def _error_response_body() -> str:
+        return (
+            ")]}'\n[[\"wrb.fr\",null,null,null,null,[13,null,"
+            "[[\"type.googleapis.com/travel.frontend.flights.ErrorResponse\","
+            "[[null,[[0,0,0],null,null,null,null,[[0]]],0,\"x\"],0]]]]]]"
+        )
+
+    def test_fail_fast_returns_none_without_retries(self):
+        """First attempt returns ErrorResponse → no second attempt fired."""
+        search = SearchFlights()
+        response = MagicMock()
+        response.text = self._error_response_body()
+        response.status_code = 200
+        with patch.object(search.client, "post", return_value=response) as post_spy:
+            result = search._post_and_extract_payload("f=encoded")
+        assert result is None
+        assert post_spy.call_count == 1
+
+    def test_transient_empty_still_retries(self):
+        """Empty body without ErrorResponse proto keeps retrying."""
+        search = SearchFlights()
+        response = MagicMock()
+        # Valid outer JSON with null inner — no proto marker.
+        response.text = ")]}'\n[[\"wrb.fr\", null, null]]"
+        response.status_code = 200
+        with patch.object(
+            search.client, "post", return_value=response
+        ) as post_spy, patch.object(
+            search.client, "warm_up_session", return_value=True
+        ):
+            result = search._post_and_extract_payload("f=encoded")
+        assert result is None
+        # All retries attempted — empty without ErrorResponse is assumed transient.
+        assert post_spy.call_count == 3
