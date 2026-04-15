@@ -89,6 +89,28 @@ def _extract_proto_type_marker(body: str) -> str | None:
     return body[idx:end]
 
 
+# Protobuf type URLs we treat as deterministic shopping-endpoint failures —
+# Google will return the same error no matter how many times we retry with
+# re-warmed cookies, so the shopping POST should fail fast and let the
+# caller fall back to a different query shape.
+_DETERMINISTIC_ERROR_PROTO_TYPES = frozenset(
+    {
+        "type.googleapis.com/travel.frontend.flights.ErrorResponse",
+    }
+)
+
+
+def _is_deterministic_error_response(body: str) -> bool:
+    """Return True when the response body embeds a known-deterministic error.
+
+    Checked via substring against ``_DETERMINISTIC_ERROR_PROTO_TYPES`` rather
+    than full JSON parsing so we can flag malformed or only-partially-JSON
+    responses too.
+    """
+    proto_type = _extract_proto_type_marker(body)
+    return proto_type in _DETERMINISTIC_ERROR_PROTO_TYPES
+
+
 class SearchFlights:
     """Flight search implementation using Google Flights' API.
 
@@ -194,20 +216,26 @@ class SearchFlights:
         """POST the shopping request and return the inner payload string.
 
         Google's ``GetShoppingResults`` occasionally returns ``null`` at
-        ``response[0][2]`` for callers whose session cookies are missing or
-        expired — even after a successful 2xx. When this happens, re-warm
-        the session and retry up to ``_MAX_EMPTY_RESPONSE_RETRIES`` total
-        attempts. Progress is logged to stderr for observability in
-        serverless logs (Vercel).
+        ``response[0][2]`` even after a successful 2xx — typically when
+        session cookies are missing/expired. Those cases are transient
+        and recover after a re-warm, so we retry up to
+        ``_MAX_EMPTY_RESPONSE_RETRIES`` total attempts with a re-warmed
+        session between attempts.
 
-        On empty payload, a truncated diagnostic of the raw response is
-        logged too — status code, size, a prefix of the body, and the
-        outer JSON shape — so operators can tell whether Google served
-        HTML (captcha), a non-2xx, a valid-but-empty shell, or some other
-        unexpected structure.
+        However, some queries produce a *deterministic* empty response —
+        Google embeds a ``travel.frontend.flights.ErrorResponse`` protobuf
+        in the body (gRPC code 13 = INTERNAL) and will return the same
+        error on every subsequent request. Retrying wastes ~22s per
+        attempt and blocks the caller's fallback. In that case we fail
+        fast after the first attempt.
 
-        Returns the non-empty inner payload string on success, or ``None``
-        if all retries produced empty payloads.
+        On each empty-payload attempt a diagnostic line is logged to
+        stderr: status, body size, extracted protobuf type (if any),
+        outer JSON shape, and a capped body prefix.
+
+        Returns the non-empty inner payload string on success, or
+        ``None`` on an empty/deterministic-error response or after all
+        transient retries are exhausted.
         """
         last_parsed: str | None = None
         for attempt in range(1, _MAX_EMPTY_RESPONSE_RETRIES + 1):
@@ -227,8 +255,21 @@ class SearchFlights:
                         flush=True,
                     )
                 return last_parsed
-            # Empty payload — dump diagnostics, re-warm, and retry.
+
             self._log_empty_response(attempt, response)
+
+            # If Google embedded an ErrorResponse protobuf, the failure
+            # is deterministic for this filter shape — retrying produces
+            # the same error. Fail fast so the caller can fall back.
+            if _is_deterministic_error_response(getattr(response, "text", "")):
+                print(
+                    "[fli] response contains ErrorResponse protobuf — "
+                    "failing fast, retry would not help",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return None
+
             warmed = self.client.warm_up_session()
             print(
                 f"[fli] shopping POST returned empty payload on attempt "
