@@ -4,6 +4,7 @@ This module contains all the data models used for flight searches and results.
 Models are designed to match Google Flights' APIs while providing a clean pythonic interface.
 """
 
+import re
 from datetime import datetime
 from enum import Enum
 
@@ -19,6 +20,8 @@ from pydantic import (
 
 from fli.models.airline import Airline
 from fli.models.airport import Airport
+
+KGMID_PATTERN = re.compile(r"^/m/[A-Za-z0-9_]+$")
 
 
 class SeatType(Enum):
@@ -173,10 +176,19 @@ class FlightSegment(BaseModel):
     For example, in a one-way flight from JFK to LAX, there would be one segment.
     In a multi-city trip from JFK -> LAX -> SEA, there would be two segments:
     JFK -> LAX and LAX -> SEA.
+
+    Airport endpoints accept either :class:`Airport` enum values for IATA codes
+    or Google Knowledge Graph identifier strings (kgmid, e.g. ``"/m/02_286"``)
+    which represent city-level searches on Google Flights.
+
+    The second element of each entry is a slot index. For IATA airports, use
+    ``0``. For kgmid city ids, use ``5`` — Google's payload rejects kgmids with
+    slot ``0`` and returns empty results. The :func:`fli.core.location_entry`
+    helper picks the correct slot automatically.
     """
 
-    departure_airport: list[list[Airport | int]]
-    arrival_airport: list[list[Airport | int]]
+    departure_airport: list[list[Airport | str | int]]
+    arrival_airport: list[list[Airport | str | int]]
     travel_date: str
     time_restrictions: TimeRestrictions | None = None
     selected_flight: FlightResult | None = None
@@ -195,22 +207,55 @@ class FlightSegment(BaseModel):
             raise ValueError("Travel date cannot be in the past")
         return v
 
+    @field_validator("departure_airport", "arrival_airport")
+    @classmethod
+    def validate_airport_entries(
+        cls, entries: list[list[Airport | str | int]]
+    ) -> list[list[Airport | str | int]]:
+        """Validate each airport entry is ``[Airport|kgmid_str, slot_int]``.
+
+        Strings must match the kgmid pattern (e.g. ``"/m/02_286"``). Arbitrary
+        strings — including IATA codes passed as strings — are rejected; use
+        the :class:`Airport` enum for IATA codes instead.
+        """
+        for entry in entries:
+            if not isinstance(entry, list) or len(entry) != 2:
+                raise ValueError(
+                    f"Airport entry must be [airport, slot_index], got {entry!r}"
+                )
+            airport, slot = entry[0], entry[1]
+            if isinstance(airport, Airport):
+                pass
+            elif isinstance(airport, str):
+                if not KGMID_PATTERN.match(airport):
+                    raise ValueError(
+                        "Airport string must be a kgmid like '/m/02_286'; "
+                        f"use Airport enum for IATA codes. Got: {airport!r}"
+                    )
+            else:
+                raise ValueError(
+                    "Airport must be an Airport enum member or kgmid string, "
+                    f"got: {type(airport).__name__}"
+                )
+            if not isinstance(slot, int) or isinstance(slot, bool):
+                raise ValueError(f"Slot index must be int, got: {type(slot).__name__}")
+        return entries
+
     @model_validator(mode="after")
     def validate_airports(self) -> "FlightSegment":
         """Validate that departure and arrival airports are different."""
         if not self.departure_airport or not self.arrival_airport:
             raise ValueError("Both departure and arrival airports must be specified")
 
-        # Get first airport from each nested list
-        dep_airport = (
-            self.departure_airport[0][0]
-            if isinstance(self.departure_airport[0][0], Airport)
-            else None
-        )
-        arr_airport = (
-            self.arrival_airport[0][0] if isinstance(self.arrival_airport[0][0], Airport) else None
-        )
+        dep_airport = self.departure_airport[0][0]
+        arr_airport = self.arrival_airport[0][0]
 
-        if dep_airport and arr_airport and dep_airport == arr_airport:
-            raise ValueError("Departure and arrival airports must be different")
+        # Compare only when both endpoints are the same kind (Airport vs kgmid);
+        # otherwise they are inherently different.
+        if isinstance(dep_airport, Airport) and isinstance(arr_airport, Airport):
+            if dep_airport == arr_airport:
+                raise ValueError("Departure and arrival airports must be different")
+        elif isinstance(dep_airport, str) and isinstance(arr_airport, str):
+            if dep_airport == arr_airport:
+                raise ValueError("Departure and arrival airports must be different")
         return self

@@ -12,6 +12,9 @@ from .builders import (
 )
 from .currency import extract_currency_from_price_token, format_price, format_price_axis_label
 from .parsers import (
+    AIRPORT_SLOT,
+    KGMID_SLOT,
+    location_entry,
     parse_airlines,
     parse_cabin_class,
     parse_emissions,
@@ -20,10 +23,14 @@ from .parsers import (
     parse_time_range,
     resolve_airport,
     resolve_enum,
+    resolve_location,
 )
 
 __all__ = [
     # Parsers
+    "AIRPORT_SLOT",
+    "KGMID_SLOT",
+    "location_entry",
     "parse_airlines",
     "parse_cabin_class",
     "parse_emissions",
@@ -32,6 +39,7 @@ __all__ = [
     "parse_time_range",
     "resolve_airport",
     "resolve_enum",
+    "resolve_location",
     # Builders
     "build_date_search_segments",
     "build_flight_segments",

@@ -60,6 +60,74 @@ def resolve_airport(code: str) -> Airport:
         raise ParseError(f"Invalid airport code: '{code}'") from e
 
 
+#: Slot index used in the Google Flights payload for IATA airport endpoints.
+AIRPORT_SLOT = 0
+
+#: Slot index used in the Google Flights payload for kgmid (city/region)
+#: endpoints. Google rejects kgmid entries with slot 0; empirical testing
+#: against the ``GetShoppingResults`` endpoint shows slot 5 yields results for
+#: knowledge-graph ids such as ``/m/02_286``.
+KGMID_SLOT = 5
+
+
+def resolve_location(value: str) -> Airport | str:
+    """Resolve a location string to either an Airport enum or a kgmid string.
+
+    Google Flights accepts two kinds of location identifiers: IATA airport codes
+    (e.g. ``'JFK'``) for airport-specific searches, and Knowledge Graph ids
+    (``/m/...``) for city-level searches covering all airports in that city.
+
+    Args:
+        value: Either a 3-letter IATA airport code (case-insensitive) or a
+            kgmid string matching ``/m/[A-Za-z0-9_]+``.
+
+    Returns:
+        The :class:`Airport` enum member for IATA codes, or the raw kgmid
+        string unchanged.
+
+    Raises:
+        ParseError: If the value is neither a valid IATA code nor a kgmid.
+
+    """
+    from fli.models.google_flights.base import KGMID_PATTERN
+
+    if KGMID_PATTERN.match(value):
+        return value
+    try:
+        return getattr(Airport, value.upper())
+    except AttributeError as e:
+        raise ParseError(
+            f"Location must be an IATA airport code (e.g. 'JFK') or kgmid "
+            f"(e.g. '/m/02_286'), got: {value!r}"
+        ) from e
+
+
+def location_entry(value: str | Airport) -> list:
+    """Build a ``FlightSegment`` airport entry with the correct slot index.
+
+    Google Flights' payload uses different slot indices for airport-coded
+    endpoints (IATA) versus city/region endpoints (kgmid). This helper hides
+    that detail from callers.
+
+    Args:
+        value: An :class:`Airport` enum member, a 3-letter IATA code string,
+            or a kgmid string (``/m/...``).
+
+    Returns:
+        A 2-element list ``[resolved_location, slot_index]`` suitable for use
+        in ``FlightSegment.departure_airport`` or ``.arrival_airport``.
+
+    Raises:
+        ParseError: If the string is neither a valid IATA code nor a kgmid.
+
+    """
+    if isinstance(value, Airport):
+        return [value, AIRPORT_SLOT]
+    resolved = resolve_location(value)
+    slot = KGMID_SLOT if isinstance(resolved, str) else AIRPORT_SLOT
+    return [resolved, slot]
+
+
 def parse_airlines(codes: list[str] | None) -> list[Airline] | None:
     """Parse a list of airline codes into Airline enums.
 
