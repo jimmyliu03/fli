@@ -26,7 +26,7 @@ class Client:
     WARMUP_URL = "https://www.google.com/travel/flights"
     WARMUP_TIMEOUT_SECONDS = 10
 
-    def __init__(self):
+    def __init__(self, proxy: str | None = None):
         """Initialize a new client session with default headers.
 
         Issues a single GET to ``WARMUP_URL`` so the session picks up Google's
@@ -35,8 +35,18 @@ class Client:
         payload for unauthenticated callers — particularly on cold
         serverless workers where the session has no cookie state. Failure
         to warm up is non-fatal; the real POST will still be attempted.
+
+        Args:
+            proxy: Optional HTTP proxy URL (e.g. ``http://user:pass@host:port``).
+                When set, both HTTP and HTTPS traffic — including the warmup
+                GET — routes through the proxy. Pass ``None`` for a direct
+                connection.
+
         """
+        self.proxy = proxy
         self._client = requests.Session()
+        if proxy:
+            self._client.proxies = {"http": proxy, "https": proxy}
         self._client.headers.update(self.DEFAULT_HEADERS)
         self.warm_up_session()
 
@@ -119,14 +129,23 @@ class Client:
             raise Exception(f"POST request failed: {str(e)}") from e
 
 
-def get_client() -> Client:
+def get_client(proxy: str | None = None) -> Client:
     """Get or create a shared HTTP client instance.
 
+    The module caches a single client instance. When ``proxy`` differs from
+    the cached instance's proxy (including switching to or from ``None``),
+    the cache is rebuilt so a subsequent request exits through the new
+    transport. Rebuilding re-runs the warmup GET, which is cheap and
+    necessary — Google's NID cookie is tied to the exit IP.
+
+    Args:
+        proxy: Optional HTTP proxy URL. See :class:`Client` for format.
+
     Returns:
-        Singleton instance of the HTTP client
+        Singleton instance of the HTTP client, configured for ``proxy``.
 
     """
     global client
-    if not client:
-        client = Client()
+    if client is None or client.proxy != proxy:
+        client = Client(proxy=proxy)
     return client
