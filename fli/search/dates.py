@@ -37,9 +37,15 @@ class SearchDates:
     }
     MAX_DAYS_PER_SEARCH = 61
 
-    def __init__(self):
-        """Initialize the search client for date-based searches."""
-        self.client = get_client()
+    def __init__(self, proxy: str | None = None):
+        """Initialize the search client for date-based searches.
+
+        Args:
+            proxy: Optional HTTP proxy URL forwarded to the shared HTTP client.
+                See :class:`fli.search.client.Client` for format and semantics.
+
+        """
+        self.client = get_client(proxy=proxy)
 
     def search(self, filters: DateSearchFilters) -> list[DatePrice] | None:
         """Search for flight prices across a date range and search parameters.
