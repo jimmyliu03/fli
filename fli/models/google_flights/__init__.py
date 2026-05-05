@@ -11,6 +11,7 @@ from .base import (
     SeatType,
     SortBy,
     TimeRestrictions,
+    TravelWarning,
     TripType,
 )
 from .dates import DateSearchFilters
@@ -33,5 +34,6 @@ __all__ = [
     "SeatType",
     "SortBy",
     "TimeRestrictions",
+    "TravelWarning",
     "TripType",
 ]
