@@ -17,6 +17,7 @@ from fli.models import (
     FlightLeg,
     FlightResult,
     FlightSearchFilters,
+    TravelWarning,
 )
 from fli.models.google_flights.base import TripType
 from fli.search.client import get_client
@@ -111,6 +112,87 @@ def _is_deterministic_error_response(body: str) -> bool:
     return proto_type in _DETERMINISTIC_ERROR_PROTO_TYPES
 
 
+def _is_itinerary_entry(el: Any) -> bool:
+    """Discriminate itinerary entries from "decoration" entries.
+
+    Real itinerary entries have their inner protobuf list at index 0;
+    decoration entries (travel-restriction advisories, etc.) inject an
+    int type marker there instead. The previous parser hit
+    ``TypeError: 'int' object is not subscriptable`` on ``data[0][9]``
+    when an advisory like
+    ``[12, None, None, None, None, ["Travel restricted", "...", 2]]``
+    sneaked into ``encoded_filters[i][0]``.
+    """
+    return (
+        isinstance(el, list)
+        and len(el) > 0
+        and isinstance(el[0], list)
+        and len(el[0]) > 0
+    )
+
+
+def _parse_travel_warning(el: Any) -> TravelWarning | None:
+    """Best-effort parse of a non-itinerary entry into a TravelWarning.
+
+    Expected shape: ``[code, *placeholders, [title, message, severity]]``.
+    The body discriminator is strict — forward-scan from index 1 for the
+    first sub-list shaped exactly ``[str, str, int]`` — so future
+    decoration shapes (action buttons, etc.) don't get mis-identified as
+    advisories.
+    """
+    if not isinstance(el, list) or not el:
+        return None
+    code = el[0]
+    if not isinstance(code, int):
+        return None
+    body = next(
+        (
+            x
+            for x in el[1:]
+            if isinstance(x, list)
+            and len(x) >= 3
+            and isinstance(x[0], str)
+            and isinstance(x[1], str)
+            and isinstance(x[2], int)
+        ),
+        None,
+    )
+    if body is None:
+        return None
+    return TravelWarning(
+        code=code, title=body[0], message=body[1], severity=body[2]
+    )
+
+
+def _collect_travel_warnings(parsed: list) -> list[TravelWarning]:
+    """Pull every advisory the parsed payload exposes.
+
+    Google places the advisory in two non-deterministic locations: at the
+    top-level (typically ``data[22]``) and/or inline as a sibling of
+    itineraries inside ``data[2][0]`` / ``data[3][0]``. This helper checks
+    both.
+    """
+    warnings: list[TravelWarning] = []
+    for idx in (2, 3):
+        if (
+            idx < len(parsed)
+            and isinstance(parsed[idx], list)
+            and parsed[idx]
+            and isinstance(parsed[idx][0], list)
+        ):
+            for el in parsed[idx][0]:
+                if not _is_itinerary_entry(el):
+                    parsed_warning = _parse_travel_warning(el)
+                    if parsed_warning is not None:
+                        warnings.append(parsed_warning)
+    if len(parsed) > 22 and isinstance(parsed[22], list):
+        for el in parsed[22]:
+            parsed_warning = _parse_travel_warning(el)
+            if parsed_warning is not None:
+                warnings.append(parsed_warning)
+    return warnings
+
+
 class SearchFlights:
     """Flight search implementation using Google Flights' API.
 
@@ -132,6 +214,9 @@ class SearchFlights:
 
         """
         self.client = get_client(proxy=proxy)
+        # Travel advisories surfaced by the most recent search() call. Reset on
+        # every search. Empty when Google emits no warnings for the route.
+        self.last_warnings: list[TravelWarning] = []
 
     def search(
         self,
@@ -173,12 +258,34 @@ class SearchFlights:
                 return None
 
             encoded_filters = json.loads(parsed)
-            flights_data = [
-                item
-                for i in [2, 3]
-                if isinstance(encoded_filters[i], list)
-                for item in encoded_filters[i][0]
-            ]
+            outer_warnings = _collect_travel_warnings(encoded_filters)
+            # Set on the instance so non-recursive (one-way / final-leg /
+            # return_combined_only) returns expose the outer-call advisories.
+            # Recursive calls below will overwrite this and we restore the
+            # outer snapshot before returning the round-trip combos.
+            self.last_warnings = outer_warnings
+            flights_data = []
+            for i in (2, 3):
+                section = encoded_filters[i] if i < len(encoded_filters) else None
+                if not (isinstance(section, list) and section and isinstance(section[0], list)):
+                    continue
+                for item in section[0]:
+                    if _is_itinerary_entry(item):
+                        flights_data.append(item)
+                        continue
+                    # Skip decoration entries (travel-restriction advisories,
+                    # etc.). _collect_travel_warnings already harvested any
+                    # parseable advisory; log unparseable shapes so silent
+                    # drops of legitimate-but-surprising itineraries stay
+                    # visible.
+                    if _parse_travel_warning(item) is None:
+                        preview = repr(item)[:200]
+                        print(
+                            f"[fli] skipped unrecognized non-itinerary entry "
+                            f"in section {i}: {preview}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
             flights = [self._parse_flights_data(flight) for flight in flights_data]
 
             if filters.trip_type == TripType.ONE_WAY:
@@ -213,6 +320,11 @@ class SearchFlights:
                         else:
                             flight_combos.append((selected_flight, next_result))
 
+            # Recursive return-leg searches overwrite self.last_warnings
+            # with the last return response's advisories. Restore the
+            # outer (outbound) advisories so callers see the warnings
+            # for the search they actually issued.
+            self.last_warnings = outer_warnings
             return flight_combos
 
         except Exception as e:

@@ -15,6 +15,7 @@ from .google_flights import (
     SeatType,
     SortBy,
     TimeRestrictions,
+    TravelWarning,
     TripType,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "SeatType",
     "SortBy",
     "TimeRestrictions",
+    "TravelWarning",
     "TripType",
 ]

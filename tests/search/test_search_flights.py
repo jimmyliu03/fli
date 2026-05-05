@@ -215,7 +215,11 @@ class TestReturnCombinedOnly:
         search = SearchFlights()
         response = MagicMock()
         response.text = ")]}'\n[]"
-        markers = [[f"marker_{i}"] for i in range(len(flights))]
+        # Each marker must shape-discriminate as an itinerary entry — el[0]
+        # is a list — so it survives the non-itinerary filter introduced
+        # alongside TravelWarning collection. The inner content doesn't
+        # matter because _parse_flights_data is patched to bypass it.
+        markers = [[[f"marker_{i}"]] for i in range(len(flights))]
         return (
             search,
             patch.object(search.client, "post", return_value=response),
@@ -436,3 +440,197 @@ class TestFailFastOnErrorResponse:
         assert result is None
         # All retries attempted — empty without ErrorResponse is assumed transient.
         assert post_spy.call_count == 3
+
+
+class TestTravelWarningHandling:
+    """Travel-restriction advisories injected by Google must not crash parsing."""
+
+    @staticmethod
+    def _warning_entry() -> list:
+        return [
+            12,
+            None,
+            None,
+            None,
+            None,
+            ["Travel restricted", "Airspace closure may affect flights.", 2],
+        ]
+
+    @staticmethod
+    def _itinerary_entry(price: float = 500.0) -> list:
+        # Minimal flight blob shaped like _parse_flights_data expects:
+        #   data[0][9] = duration (minutes)
+        #   data[0][2] = legs list (one leg = nonstop)
+        #   data[1] = price block; data[1][0][-1] = price
+        leg = [None] * 23
+        leg[3] = "WAW"
+        leg[6] = "HEL"
+        leg[8] = [10, 30]
+        leg[10] = [13, 0]
+        leg[11] = 150
+        leg[20] = [2026, 6, 12]
+        leg[21] = [2026, 6, 12]
+        leg[22] = ["AY", "100"]
+
+        main = [None] * 14
+        main[2] = [leg]
+        main[9] = 150
+
+        return [
+            main,
+            [[None, None, price], "USD"],
+        ]
+
+    def _stub_search(self, encoded_payload: list) -> SearchFlights:
+        from fli.models import (
+            FlightSearchFilters,
+            FlightSegment,
+            MaxStops,
+            PassengerInfo,
+            SeatType,
+            SortBy,
+        )
+        from fli.models.google_flights.base import TripType
+
+        search = SearchFlights()
+        # Wire _post_and_extract_payload to return our crafted JSON.
+        with patch.object(
+            search,
+            "_post_and_extract_payload",
+            return_value=__import__("json").dumps(encoded_payload),
+        ):
+            filters = FlightSearchFilters(
+                passenger_info=PassengerInfo(
+                    adults=1, children=0, infants_in_seat=0, infants_on_lap=0
+                ),
+                flight_segments=[
+                    FlightSegment(
+                        departure_airport=[[Airport.WAW, 0]],
+                        arrival_airport=[[Airport.HEL, 0]],
+                        travel_date=(
+                            datetime.now() + timedelta(days=30)
+                        ).strftime("%Y-%m-%d"),
+                    )
+                ],
+                stops=MaxStops.ANY,
+                seat_type=SeatType.ECONOMY,
+                sort_by=SortBy.CHEAPEST,
+                trip_type=TripType.ONE_WAY,
+            )
+            results = search.search(filters)
+        return search, results
+
+    def test_inline_warning_does_not_crash_parser(self):
+        """Repro: advisory entry inline in section [2][0]. Previously TypeError'd."""
+        payload = [None, None, [[self._warning_entry(), self._itinerary_entry()]], None]
+        search, results = self._stub_search(payload)
+
+        assert results is not None
+        assert len(results) == 1
+        assert results[0].price == 500.0
+        assert search.last_warnings, "the inline advisory should surface"
+        assert search.last_warnings[0].title == "Travel restricted"
+        assert search.last_warnings[0].code == 12
+        assert search.last_warnings[0].severity == 2
+
+    def test_top_level_warning_at_data_22_is_collected(self):
+        """Advisory placed at top-level data[22] is collected, parsing unaffected."""
+        payload = [None] * 31
+        payload[2] = [[self._itinerary_entry()]]
+        payload[22] = [self._warning_entry()]
+        search, results = self._stub_search(payload)
+
+        assert results is not None
+        assert len(results) == 1
+        titles = [w.title for w in search.last_warnings]
+        assert "Travel restricted" in titles
+
+    def test_clean_response_has_empty_warnings(self):
+        payload = [None, None, [[self._itinerary_entry()]], None]
+        search, results = self._stub_search(payload)
+
+        assert results is not None
+        assert search.last_warnings == []
+
+    def test_is_itinerary_entry_discriminator(self):
+        from fli.search.flights import _is_itinerary_entry
+
+        assert _is_itinerary_entry(self._itinerary_entry()) is True
+        assert _is_itinerary_entry(self._warning_entry()) is False
+        assert _is_itinerary_entry([]) is False
+        assert _is_itinerary_entry(None) is False
+        assert _is_itinerary_entry("a string") is False
+
+    def test_parse_travel_warning_extracts_fields(self):
+        from fli.search.flights import _parse_travel_warning
+
+        parsed = _parse_travel_warning(self._warning_entry())
+        assert parsed is not None
+        assert parsed.code == 12
+        assert parsed.title == "Travel restricted"
+        assert parsed.message == "Airspace closure may affect flights."
+        assert parsed.severity == 2
+
+    def test_parse_travel_warning_returns_none_for_unrelated(self):
+        from fli.search.flights import _parse_travel_warning
+
+        assert _parse_travel_warning([1, 2, 3]) is None
+        assert _parse_travel_warning("not a list") is None
+        assert _parse_travel_warning([]) is None
+
+    def test_is_itinerary_entry_rejects_empty_inner_list(self):
+        """Edge case: real-looking entry with empty el[0] should be filtered.
+
+        Without this guard, _parse_flights_data would crash with IndexError
+        on data[0][9] — distinct from the original int-marker bug but in
+        the same crash class.
+        """
+        from fli.search.flights import _is_itinerary_entry
+
+        assert _is_itinerary_entry([[], None]) is False
+
+    def test_round_trip_recursion_preserves_outbound_warnings(
+        self, round_trip_search_params
+    ):
+        """Outer-call advisories must survive recursive return-leg searches.
+
+        The round-trip flow recurses to fetch each outbound's return
+        options. Each recursive search() overwrites self.last_warnings.
+        The outer call must restore the outbound advisories before
+        returning so callers see the warnings for the search they issued.
+        """
+        from fli.models.google_flights.base import TripType
+
+        outbound_warning = self._warning_entry()
+        outbound_itinerary = self._itinerary_entry(price=400.0)
+        return_itinerary = self._itinerary_entry(price=300.0)
+        outbound_payload = [
+            None,
+            None,
+            [[outbound_warning, outbound_itinerary]],
+            None,
+        ]
+        # Return-leg response carries no warnings — that's the case
+        # where the outer-call advisory must survive.
+        return_payload = [None, None, [[return_itinerary]], None]
+
+        search = SearchFlights()
+
+        import json as _json
+
+        payloads = iter(
+            [_json.dumps(outbound_payload), _json.dumps(return_payload)]
+        )
+
+        with patch.object(
+            search,
+            "_post_and_extract_payload",
+            side_effect=lambda *_a, **_kw: next(payloads),
+        ):
+            params = round_trip_search_params
+            params.trip_type = TripType.ROUND_TRIP
+            results = search.search(params, top_n=1)
+
+        assert results is not None
+        assert search.last_warnings, "outbound advisory must survive recursion"
+        assert search.last_warnings[0].title == "Travel restricted"

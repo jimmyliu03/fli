@@ -170,6 +170,30 @@ class FlightResult(BaseModel):
     stops: NonNegativeInt
 
 
+class TravelWarning(BaseModel):
+    """Travel advisory dialog Google injects into the response.
+
+    Observed on routes affected by airspace closures (e.g. Warsaw to Asia
+    after Russian airspace was closed): Google emits a sibling entry such
+    as ``[12, null, null, null, null, ["Travel restricted",
+    "Airspace closure may affect flights.", 2]]`` either at the top level
+    of the parsed payload or inline as a sibling of itineraries inside
+    ``data[2][0]``/``data[3][0]``.
+
+    The leading int is a type marker (``12`` = travel-restriction
+    advisory) and the trailing int in the body is a severity (1=info,
+    2=warning).
+
+    Surfaced via :attr:`SearchFlights.last_warnings` so callers can read
+    advisories without parsing the raw payload themselves.
+    """
+
+    code: int
+    title: str
+    message: str
+    severity: int
+
+
 class FlightSegment(BaseModel):
     """A segment represents a single portion of a flight journey between two airports.
 
