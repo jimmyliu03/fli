@@ -577,3 +577,60 @@ class TestTravelWarningHandling:
         assert _parse_travel_warning([1, 2, 3]) is None
         assert _parse_travel_warning("not a list") is None
         assert _parse_travel_warning([]) is None
+
+    def test_is_itinerary_entry_rejects_empty_inner_list(self):
+        """Edge case: real-looking entry with empty el[0] should be filtered.
+
+        Without this guard, _parse_flights_data would crash with IndexError
+        on data[0][9] — distinct from the original int-marker bug but in
+        the same crash class.
+        """
+        from fli.search.flights import _is_itinerary_entry
+
+        assert _is_itinerary_entry([[], None]) is False
+
+    def test_round_trip_recursion_preserves_outbound_warnings(
+        self, round_trip_search_params
+    ):
+        """Outer-call advisories must survive recursive return-leg searches.
+
+        The round-trip flow recurses to fetch each outbound's return
+        options. Each recursive search() overwrites self.last_warnings.
+        The outer call must restore the outbound advisories before
+        returning so callers see the warnings for the search they issued.
+        """
+        from fli.models.google_flights.base import TripType
+
+        outbound_warning = self._warning_entry()
+        outbound_itinerary = self._itinerary_entry(price=400.0)
+        return_itinerary = self._itinerary_entry(price=300.0)
+        outbound_payload = [
+            None,
+            None,
+            [[outbound_warning, outbound_itinerary]],
+            None,
+        ]
+        # Return-leg response carries no warnings — that's the case
+        # where the outer-call advisory must survive.
+        return_payload = [None, None, [[return_itinerary]], None]
+
+        search = SearchFlights()
+
+        import json as _json
+
+        payloads = iter(
+            [_json.dumps(outbound_payload), _json.dumps(return_payload)]
+        )
+
+        with patch.object(
+            search,
+            "_post_and_extract_payload",
+            side_effect=lambda *_a, **_kw: next(payloads),
+        ):
+            params = round_trip_search_params
+            params.trip_type = TripType.ROUND_TRIP
+            results = search.search(params, top_n=1)
+
+        assert results is not None
+        assert search.last_warnings, "outbound advisory must survive recursion"
+        assert search.last_warnings[0].title == "Travel restricted"

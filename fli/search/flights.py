@@ -123,7 +123,12 @@ def _is_itinerary_entry(el: Any) -> bool:
     ``[12, None, None, None, None, ["Travel restricted", "...", 2]]``
     sneaked into ``encoded_filters[i][0]``.
     """
-    return isinstance(el, list) and len(el) > 0 and isinstance(el[0], list)
+    return (
+        isinstance(el, list)
+        and len(el) > 0
+        and isinstance(el[0], list)
+        and len(el[0]) > 0
+    )
 
 
 def _parse_travel_warning(el: Any) -> TravelWarning | None:
@@ -253,7 +258,12 @@ class SearchFlights:
                 return None
 
             encoded_filters = json.loads(parsed)
-            self.last_warnings = _collect_travel_warnings(encoded_filters)
+            outer_warnings = _collect_travel_warnings(encoded_filters)
+            # Set on the instance so non-recursive (one-way / final-leg /
+            # return_combined_only) returns expose the outer-call advisories.
+            # Recursive calls below will overwrite this and we restore the
+            # outer snapshot before returning the round-trip combos.
+            self.last_warnings = outer_warnings
             flights_data = []
             for i in (2, 3):
                 section = encoded_filters[i] if i < len(encoded_filters) else None
@@ -310,6 +320,11 @@ class SearchFlights:
                         else:
                             flight_combos.append((selected_flight, next_result))
 
+            # Recursive return-leg searches overwrite self.last_warnings
+            # with the last return response's advisories. Restore the
+            # outer (outbound) advisories so callers see the warnings
+            # for the search they actually issued.
+            self.last_warnings = outer_warnings
             return flight_combos
 
         except Exception as e:
