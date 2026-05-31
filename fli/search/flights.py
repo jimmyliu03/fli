@@ -14,6 +14,8 @@ from fli.core import extract_currency_from_price_token
 from fli.models import (
     Airline,
     Airport,
+    FareOption,
+    FareOptionsResult,
     FlightLeg,
     FlightResult,
     FlightSearchFilters,
@@ -33,6 +35,19 @@ _MAX_EMPTY_RESPONSE_RETRIES = 3
 # long that serverless logs get flooded.
 _RAW_BODY_PREVIEW_CHARS = 600
 
+_FARE_BRAND_KEYWORDS = (
+    "basic economy",
+    "economy",
+    "main cabin",
+    "standard",
+    "flex",
+    "flexible",
+    "refundable",
+    "premium economy",
+    "business",
+    "first",
+)
+
 
 def _describe_json_shape(node: Any, _depth: int = 0, _max_depth: int = 3) -> str:
     """Describe a parsed-JSON structure concisely for diagnostics.
@@ -48,7 +63,7 @@ def _describe_json_shape(node: Any, _depth: int = 0, _max_depth: int = 3) -> str
         return "null"
     if isinstance(node, bool):
         return "bool"
-    if isinstance(node, (int, float)):
+    if isinstance(node, int | float):
         return "number"
     if isinstance(node, str):
         return f"str(len={len(node)})"
@@ -191,6 +206,96 @@ def _collect_travel_warnings(parsed: list) -> list[TravelWarning]:
             if parsed_warning is not None:
                 warnings.append(parsed_warning)
     return warnings
+
+
+def _walk_payload(node: Any, path: str = "$") -> list[tuple[str, Any]]:
+    """Return ``(path, value)`` pairs for every node in a nested payload."""
+    pairs = [(path, node)]
+    if isinstance(node, list):
+        for idx, value in enumerate(node):
+            pairs.extend(_walk_payload(value, f"{path}[{idx}]"))
+    elif isinstance(node, dict):
+        for key, value in node.items():
+            pairs.extend(_walk_payload(value, f"{path}.{key}"))
+    return pairs
+
+
+def _looks_like_fare_brand(value: str) -> bool:
+    lowered = value.strip().lower()
+    if not lowered or len(lowered) > 80:
+        return False
+    return any(keyword in lowered for keyword in _FARE_BRAND_KEYWORDS)
+
+
+def _extract_fare_options(payload: Any) -> list[FareOption]:
+    """Best-effort extraction of explicit fare-family options from raw payloads.
+
+    The shopping payload often contains many unrelated strings with words like
+    "economy". To avoid false positives, this only returns options when a small
+    list-shaped node contains both a fare-like label and an adjacent parseable
+    price block. In current observed Google shopping responses this usually
+    returns an empty list, which callers should treat as a signal to use a
+    browser-backed booking-page extractor if fare-family pricing is required.
+    """
+    options: list[FareOption] = []
+    seen: set[tuple[str | None, float | None, str | None]] = set()
+
+    for path, node in _walk_payload(payload):
+        if not isinstance(node, list) or len(node) > 12:
+            continue
+
+        strings = [item for item in node if isinstance(item, str)]
+        brand = next((s.strip() for s in strings if _looks_like_fare_brand(s)), None)
+        if not brand:
+            continue
+
+        price = None
+        currency = None
+        price_candidates = [node] + [item for item in node if isinstance(item, list)]
+        for price_candidate in price_candidates:
+            try:
+                price, currency = SearchFlights._parse_price_info([None, price_candidate])
+            except (TypeError, ValueError):
+                price = None
+                currency = None
+            if price:
+                break
+        if not price:
+            continue
+
+        normalized_brand = brand.lower()
+        key = (normalized_brand, price, currency)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        options.append(
+            FareOption(
+                brand=brand,
+                cabin=_infer_cabin_from_brand(brand),
+                basic_economy="basic" in normalized_brand,
+                price=price,
+                currency=currency,
+                refundability="refundable" if "refund" in normalized_brand else None,
+                changeability="flexible" if "flex" in normalized_brand else None,
+                raw_path=path,
+            )
+        )
+
+    return options
+
+
+def _infer_cabin_from_brand(brand: str) -> str | None:
+    lowered = brand.lower()
+    if "first" in lowered:
+        return "first"
+    if "business" in lowered:
+        return "business"
+    if "premium" in lowered:
+        return "premium_economy"
+    if "economy" in lowered or "main cabin" in lowered:
+        return "economy"
+    return None
 
 
 class SearchFlights:
@@ -483,6 +588,7 @@ class SearchFlights:
             currency=currency,
             duration=data[0][9],
             stops=len(data[0][2]) - 1,
+            raw_data=data,
             legs=[
                 FlightLeg(
                     airline=SearchFlights._parse_airline(fl[22][0]),
@@ -497,6 +603,39 @@ class SearchFlights:
             ],
         )
         return flight
+
+    def inspect_fare_options(self, filters: FlightSearchFilters) -> FareOptionsResult:
+        """Inspect a Google shopping response for fare-family price options.
+
+        Google's ``GetShoppingResults`` payload consistently exposes the
+        combined itinerary price used by :meth:`search`. Booking-page fare
+        family upsells are not always present in that payload. This method
+        returns a typed unavailable result instead of pretending the base
+        itinerary price is a fare-family breakdown.
+        """
+        encoded_filters = filters.encode()
+        parsed = self._post_and_extract_payload(encoded_filters)
+        if not parsed:
+            return FareOptionsResult(
+                available=False,
+                reason="empty_google_shopping_payload",
+            )
+
+        try:
+            payload = json.loads(parsed)
+        except (TypeError, ValueError):
+            return FareOptionsResult(
+                available=False,
+                reason="unparseable_google_shopping_payload",
+            )
+
+        fare_options = _extract_fare_options(payload)
+        if not fare_options:
+            return FareOptionsResult(
+                available=False,
+                reason="fare_options_not_exposed_in_google_shopping_payload",
+            )
+        return FareOptionsResult(available=True, fare_options=fare_options)
 
     @staticmethod
     def _parse_price_info(data: list) -> tuple[float, str | None]:

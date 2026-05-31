@@ -1,13 +1,19 @@
 """Tests for Search class."""
 
+import json
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from fli.core import build_selected_return_segments
 from fli.models import (
+    Airline,
     Airport,
+    FareOptionsResult,
+    FlightLeg,
+    FlightResult,
     FlightSearchFilters,
     FlightSegment,
     MaxStops,
@@ -204,8 +210,7 @@ class TestReturnCombinedOnly:
 
     @staticmethod
     def _patched_search(flights: list):
-        """Return a context manager that makes the initial HTTP/parse pipeline
-        yield ``flights`` as the parsed first-response flight list.
+        """Return a context manager for the initial HTTP/parse pipeline.
 
         Mocks ``client.post``, the two ``json.loads`` calls, and
         ``_parse_flights_data`` so the test never hits the network. The second
@@ -264,6 +269,84 @@ class TestReturnCombinedOnly:
         with client_patch, json_patch, parse_patch:
             results = search.search(basic_search_params, return_combined_only=True)
         assert results == one_way_flights
+
+
+class TestSelectedReturnSegments:
+    """Tests for explicit open-jaw selected-return segment construction."""
+
+    def test_build_selected_return_segments_preserves_open_jaw_route(self):
+        today = datetime.now()
+        outbound_date = (today + timedelta(days=30)).strftime("%Y-%m-%d")
+        return_date = (today + timedelta(days=37)).strftime("%Y-%m-%d")
+        selected_outbound = FlightResult(
+            legs=[
+                FlightLeg(
+                    airline=Airline.UA,
+                    flight_number="100",
+                    departure_airport=Airport.SFO,
+                    arrival_airport=Airport.JFK,
+                    departure_datetime=datetime.fromisoformat(f"{outbound_date}T08:00:00"),
+                    arrival_datetime=datetime.fromisoformat(f"{outbound_date}T16:00:00"),
+                    duration=300,
+                )
+            ],
+            price=0.0,
+            duration=300,
+            stops=0,
+        )
+
+        segments, trip_type = build_selected_return_segments(
+            outbound_origin=Airport.SFO,
+            outbound_destination=Airport.JFK,
+            outbound_date=outbound_date,
+            selected_outbound=selected_outbound,
+            return_origin=Airport.LGA,
+            return_destination=Airport.SFO,
+            return_date=return_date,
+        )
+        filters = FlightSearchFilters(
+            trip_type=trip_type,
+            passenger_info=PassengerInfo(adults=1),
+            flight_segments=segments,
+        )
+        formatted_segments = filters.format()[1][13]
+
+        assert formatted_segments[0][8] == [
+            ["SFO", outbound_date, "JFK", None, "UA", "100"]
+        ]
+        assert formatted_segments[1][0] == [[["LGA", 0]]]
+        assert formatted_segments[1][1] == [[["SFO", 0]]]
+        assert formatted_segments[1][6] == return_date
+
+
+class TestFareOptionsInspection:
+    """Tests for typed fare-options inspection results."""
+
+    def test_inspect_fare_options_reports_unavailable_when_payload_has_no_fares(
+        self, basic_search_params
+    ):
+        search = SearchFlights()
+        with (
+            patch.object(search, "_post_and_extract_payload", return_value=json.dumps([None])),
+        ):
+            result = search.inspect_fare_options(basic_search_params)
+
+        assert isinstance(result, FareOptionsResult)
+        assert result.available is False
+        assert result.fare_options == []
+        assert result.reason == "fare_options_not_exposed_in_google_shopping_payload"
+
+    def test_inspect_fare_options_extracts_explicit_fare_price(self, basic_search_params):
+        search = SearchFlights()
+        payload = [["Economy Flexible", [[None, 249]], "fare family"]]
+
+        with patch.object(search, "_post_and_extract_payload", return_value=json.dumps(payload)):
+            result = search.inspect_fare_options(basic_search_params)
+
+        assert result.available is True
+        assert result.fare_options[0].brand == "Economy Flexible"
+        assert result.fare_options[0].price == 249.0
+        assert result.fare_options[0].cabin == "economy"
 
 
 class TestParsePriceInfo:

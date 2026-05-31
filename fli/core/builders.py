@@ -6,7 +6,9 @@ to construct flight search filter objects.
 
 from datetime import datetime, timedelta
 
-from fli.models import Airport, FlightSegment, TimeRestrictions, TripType
+from fli.models import Airport, FlightResult, FlightSegment, TimeRestrictions, TripType
+
+from .parsers import location_entry
 
 
 def normalize_date(date_str: str) -> str:
@@ -111,6 +113,46 @@ def build_flight_segments(
         )
 
     return segments, trip_type
+
+
+def build_selected_return_segments(
+    outbound_origin: Airport | str,
+    outbound_destination: Airport | str,
+    outbound_date: str,
+    selected_outbound: FlightResult,
+    return_origin: Airport | str,
+    return_destination: Airport | str,
+    return_date: str,
+    time_restrictions: TimeRestrictions | None = None,
+) -> tuple[list[FlightSegment], TripType]:
+    """Build round-trip segments with a selected outbound and explicit return route.
+
+    This is useful for open-jaw itineraries where the outbound destination and
+    return origin differ, such as ``IND -> SOF`` outbound and ``OTP -> IND``
+    return. It preserves the normal Google selected-flight shape while avoiding
+    the common closed-jaw assumption that return origin is always the outbound
+    destination.
+    """
+    outbound_date = normalize_date(outbound_date)
+    return_date = normalize_date(return_date)
+
+    return (
+        [
+            FlightSegment(
+                departure_airport=[location_entry(outbound_origin)],
+                arrival_airport=[location_entry(outbound_destination)],
+                travel_date=outbound_date,
+                selected_flight=selected_outbound,
+            ),
+            FlightSegment(
+                departure_airport=[location_entry(return_origin)],
+                arrival_airport=[location_entry(return_destination)],
+                travel_date=return_date,
+                time_restrictions=time_restrictions,
+            ),
+        ],
+        TripType.ROUND_TRIP,
+    )
 
 
 def build_multi_city_segments(
