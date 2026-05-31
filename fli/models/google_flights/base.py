@@ -7,9 +7,11 @@ Models are designed to match Google Flights' APIs while providing a clean python
 import re
 from datetime import datetime
 from enum import Enum
+from typing import Any
 
 from pydantic import (
     BaseModel,
+    Field,
     NonNegativeFloat,
     NonNegativeInt,
     PositiveInt,
@@ -168,6 +170,29 @@ class FlightResult(BaseModel):
     currency: str | None = None
     duration: PositiveInt  # total duration in minutes
     stops: NonNegativeInt
+    raw_data: Any | None = Field(default=None, exclude=True, repr=False)
+
+
+class FareOption(BaseModel):
+    """A fare-family option for a selected itinerary, when Google exposes one."""
+
+    brand: str | None = None
+    cabin: str | None = None
+    basic_economy: bool | None = None
+    price: NonNegativeFloat | None = None
+    currency: str | None = None
+    bags: str | None = None
+    refundability: str | None = None
+    changeability: str | None = None
+    raw_path: str | None = None
+
+
+class FareOptionsResult(BaseModel):
+    """Result of inspecting Google payloads for fare-family pricing."""
+
+    available: bool
+    fare_options: list[FareOption] = Field(default_factory=list)
+    reason: str | None = None
 
 
 class TravelWarning(BaseModel):
