@@ -128,22 +128,78 @@ def _is_deterministic_error_response(body: str) -> bool:
 
 
 def _is_itinerary_entry(el: Any) -> bool:
-    """Discriminate itinerary entries from "decoration" entries.
+    """Discriminate displayable itinerary entries from decoration/metadata.
 
-    Real itinerary entries have their inner protobuf list at index 0;
-    decoration entries (travel-restriction advisories, etc.) inject an
-    int type marker there instead. The previous parser hit
-    ``TypeError: 'int' object is not subscriptable`` on ``data[0][9]``
-    when an advisory like
-    ``[12, None, None, None, None, ["Travel restricted", "...", 2]]``
-    sneaked into ``encoded_filters[i][0]``.
+    Real itinerary entries must have every field consumed by
+    ``_parse_flights_data`` and at least one displayable leg. Decoration rows
+    can inject an int type marker, and Google also emits metadata/error rows
+    whose index 0 is a list but whose leg/date/time fields are missing.
     """
+    return _itinerary_entry_rejection_reason(el) is None
+
+
+def _is_date_array(value: Any) -> bool:
     return (
-        isinstance(el, list)
-        and len(el) > 0
-        and isinstance(el[0], list)
-        and len(el[0]) > 0
+        isinstance(value, list)
+        and len(value) >= 3
+        and all(isinstance(part, int) for part in value[:3])
     )
+
+
+def _is_time_array(value: Any) -> bool:
+    return isinstance(value, list) and len(value) >= 1 and isinstance(value[0], int)
+
+
+def _leg_rejection_reason(leg: Any, index: int) -> str | None:
+    if not isinstance(leg, list):
+        return f"leg[{index}] is not a list"
+    if len(leg) <= 22:
+        return f"leg[{index}] too short"
+    if not isinstance(leg[3], str):
+        return f"leg[{index}] missing departure airport"
+    if not isinstance(leg[6], str):
+        return f"leg[{index}] missing arrival airport"
+    if not _is_time_array(leg[8]):
+        return f"leg[{index}] missing departure time"
+    if not _is_time_array(leg[10]):
+        return f"leg[{index}] missing arrival time"
+    if not isinstance(leg[11], int):
+        return f"leg[{index}] missing duration"
+    if not _is_date_array(leg[20]):
+        return f"leg[{index}] missing departure date"
+    if not _is_date_array(leg[21]):
+        return f"leg[{index}] missing arrival date"
+    airline = leg[22]
+    if not (
+        isinstance(airline, list)
+        and len(airline) > 1
+        and isinstance(airline[0], str)
+        and isinstance(airline[1], (str, int))
+    ):
+        return f"leg[{index}] missing airline"
+    return None
+
+
+def _itinerary_entry_rejection_reason(el: Any) -> str | None:
+    if not isinstance(el, list):
+        return "entry is not a list"
+    if len(el) <= 1:
+        return "entry too short"
+    summary = el[0]
+    if not isinstance(summary, list):
+        return "summary is not a list"
+    if len(summary) <= 9:
+        return "summary too short"
+    legs = summary[2] if len(summary) > 2 else None
+    if not isinstance(legs, list) or not legs:
+        return "no legs"
+    if not isinstance(summary[9], int):
+        return "missing itinerary duration"
+    for index, leg in enumerate(legs):
+        reason = _leg_rejection_reason(leg, index)
+        if reason is not None:
+            return reason
+    return None
 
 
 def _parse_travel_warning(el: Any) -> TravelWarning | None:
@@ -322,6 +378,10 @@ class SearchFlights:
         # Travel advisories surfaced by the most recent search() call. Reset on
         # every search. Empty when Google emits no warnings for the route.
         self.last_warnings: list[TravelWarning] = []
+        # Parser diagnostics surfaced by the most recent search() call. Entries
+        # are small dictionaries with section/index/reason details for rows that
+        # were skipped instead of raising a global search failure.
+        self.last_parse_diagnostics: list[dict[str, Any]] = []
 
     def search(
         self,
@@ -364,19 +424,21 @@ class SearchFlights:
 
             encoded_filters = json.loads(parsed)
             outer_warnings = _collect_travel_warnings(encoded_filters)
+            parse_diagnostics: list[dict[str, Any]] = []
             # Set on the instance so non-recursive (one-way / final-leg /
             # return_combined_only) returns expose the outer-call advisories.
             # Recursive calls below will overwrite this and we restore the
             # outer snapshot before returning the round-trip combos.
             self.last_warnings = outer_warnings
+            self.last_parse_diagnostics = parse_diagnostics
             flights_data = []
             for i in (2, 3):
                 section = encoded_filters[i] if i < len(encoded_filters) else None
                 if not (isinstance(section, list) and section and isinstance(section[0], list)):
                     continue
-                for item in section[0]:
+                for item_index, item in enumerate(section[0]):
                     if _is_itinerary_entry(item):
-                        flights_data.append(item)
+                        flights_data.append((i, item_index, item))
                         continue
                     # Skip decoration entries (travel-restriction advisories,
                     # etc.). _collect_travel_warnings already harvested any
@@ -384,14 +446,42 @@ class SearchFlights:
                     # drops of legitimate-but-surprising itineraries stay
                     # visible.
                     if _parse_travel_warning(item) is None:
+                        reason = _itinerary_entry_rejection_reason(item)
+                        parse_diagnostics.append(
+                            {
+                                "section": i,
+                                "index": item_index,
+                                "reason": reason or "unrecognized non-itinerary entry",
+                            }
+                        )
                         preview = repr(item)[:200]
                         print(
                             f"[fli] skipped unrecognized non-itinerary entry "
-                            f"in section {i}: {preview}",
+                            f"in section {i} index {item_index}: "
+                            f"{reason or 'unknown shape'}; {preview}",
                             file=sys.stderr,
                             flush=True,
                         )
-            flights = [self._parse_flights_data(flight) for flight in flights_data]
+            flights = []
+            for section_index, item_index, flight_data in flights_data:
+                try:
+                    flights.append(self._parse_flights_data(flight_data))
+                except Exception as exc:
+                    parse_diagnostics.append(
+                        {
+                            "section": section_index,
+                            "index": item_index,
+                            "reason": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    preview = repr(flight_data)[:200]
+                    print(
+                        f"[fli] skipped malformed itinerary in section "
+                        f"{section_index} index {item_index}: "
+                        f"{type(exc).__name__}: {exc}; {preview}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
             if filters.trip_type == TripType.ONE_WAY:
                 return flights
@@ -430,6 +520,7 @@ class SearchFlights:
             # outer (outbound) advisories so callers see the warnings
             # for the search they actually issued.
             self.last_warnings = outer_warnings
+            self.last_parse_diagnostics = parse_diagnostics
             return flight_combos
 
         except Exception as e:
@@ -582,16 +673,20 @@ class SearchFlights:
             Structured FlightResult object with all flight details
 
         """
+        rejection_reason = _itinerary_entry_rejection_reason(data)
+        if rejection_reason is not None:
+            raise ValueError(f"Invalid itinerary entry: {rejection_reason}")
+
         price, currency = SearchFlights._parse_price_info(data)
-        flight = FlightResult(
-            price=price,
-            currency=currency,
-            duration=data[0][9],
-            stops=len(data[0][2]) - 1,
-            raw_data=data,
-            legs=[
+        legs: list[FlightLeg] = []
+        raw_legs = data[0][2]
+        for index, fl in enumerate(raw_legs):
+            leg_reason = _leg_rejection_reason(fl, index)
+            if leg_reason is not None:
+                raise ValueError(f"Invalid itinerary leg: {leg_reason}")
+            legs.append(
                 FlightLeg(
-                    airline=SearchFlights._parse_airline(fl[22][0]),
+                    airline=SearchFlights._parse_airline(str(fl[22][0])),
                     flight_number=fl[22][1],
                     departure_airport=SearchFlights._parse_airport(fl[3]),
                     arrival_airport=SearchFlights._parse_airport(fl[6]),
@@ -599,8 +694,14 @@ class SearchFlights:
                     arrival_datetime=SearchFlights._parse_datetime(fl[21], fl[10]),
                     duration=fl[11],
                 )
-                for fl in data[0][2]
-            ],
+            )
+        flight = FlightResult(
+            price=price,
+            currency=currency,
+            duration=data[0][9],
+            stops=len(raw_legs) - 1,
+            raw_data=data,
+            legs=legs,
         )
         return flight
 

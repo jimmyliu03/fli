@@ -564,6 +564,33 @@ class TestTravelWarningHandling:
             [[None, None, price], "USD"],
         ]
 
+    @staticmethod
+    def _metadata_entry_with_inner_list() -> list:
+        return [
+            [
+                None,
+                [
+                    [1783215731165430, 16320100, 3694350293],
+                    None,
+                    None,
+                    None,
+                    None,
+                    [[0]],
+                ],
+                0,
+                "c7ZJaraMCuSM5LcP1Z_N4Q0",
+                "HSQ2vRWrHUckAIEgBQBG--------pfbgq40AAAAAGpJtnMCmjXOA",
+            ],
+            [None, ""],
+        ]
+
+    @staticmethod
+    def _itinerary_entry_with_missing_datetime() -> list:
+        entry = TestTravelWarningHandling._itinerary_entry(price=600.0)
+        entry[0][2][0][8] = [None]
+        entry[0][2][0][20] = [None, None, None]
+        return entry
+
     def _stub_search(self, encoded_payload: list) -> SearchFlights:
         from fli.models import (
             FlightSearchFilters,
@@ -639,10 +666,46 @@ class TestTravelWarningHandling:
         from fli.search.flights import _is_itinerary_entry
 
         assert _is_itinerary_entry(self._itinerary_entry()) is True
+        assert _is_itinerary_entry(self._metadata_entry_with_inner_list()) is False
+        assert _is_itinerary_entry(self._itinerary_entry_with_missing_datetime()) is False
         assert _is_itinerary_entry(self._warning_entry()) is False
         assert _is_itinerary_entry([]) is False
         assert _is_itinerary_entry(None) is False
         assert _is_itinerary_entry("a string") is False
+
+    def test_metadata_entry_with_inner_list_is_skipped(self):
+        payload = [
+            None,
+            None,
+            [[self._metadata_entry_with_inner_list(), self._itinerary_entry()]],
+            None,
+        ]
+        search, results = self._stub_search(payload)
+
+        assert results is not None
+        assert len(results) == 1
+        assert results[0].price == 500.0
+        assert search.last_parse_diagnostics
+        assert search.last_parse_diagnostics[0]["reason"] == "summary too short"
+
+    def test_missing_datetime_entry_is_skipped_without_fake_datetime(self):
+        payload = [
+            None,
+            None,
+            [[self._itinerary_entry_with_missing_datetime(), self._itinerary_entry()]],
+            None,
+        ]
+        search, results = self._stub_search(payload)
+
+        assert results is not None
+        assert len(results) == 1
+        assert results[0].price == 500.0
+        reasons = [diag["reason"] for diag in search.last_parse_diagnostics]
+        assert "leg[0] missing departure time" in reasons
+
+    def test_parse_flights_data_rejects_missing_datetime(self):
+        with pytest.raises(ValueError, match="missing departure time"):
+            SearchFlights._parse_flights_data(self._itinerary_entry_with_missing_datetime())
 
     def test_parse_travel_warning_extracts_fields(self):
         from fli.search.flights import _parse_travel_warning
