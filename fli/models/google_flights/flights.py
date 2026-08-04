@@ -101,10 +101,12 @@ class FlightSearchFilters(BaseModel):
             else:
                 time_filters = None
 
-            # Airlines
+            # Airlines. Multi-city callers may constrain each route
+            # independently; fall back to the legacy search-wide value.
             airlines_filters = None
-            if self.airlines:
-                sorted_airlines = sorted(self.airlines, key=lambda x: x.value)
+            segment_airlines = segment.airlines if segment.airlines is not None else self.airlines
+            if segment_airlines:
+                sorted_airlines = sorted(segment_airlines, key=lambda x: x.value)
                 airlines_filters = [serialize(airline) for airline in sorted_airlines]
 
             # Layover restrictions
@@ -142,7 +144,7 @@ class FlightSearchFilters(BaseModel):
                 segment_filters[0],  # departure airport
                 segment_filters[1],  # arrival airport
                 time_filters,  # time restrictions
-                serialize(self.stops.value),  # stops
+                serialize((segment.stops or self.stops).value),  # stops
                 airlines_filters,  # airlines
                 None,  # unknown: accepts [] but 400s on scalars; seemingly no effect
                 segment.travel_date,  # travel date

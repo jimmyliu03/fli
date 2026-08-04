@@ -12,6 +12,7 @@ from fli.models import (
     FlightResult,
     FlightSearchFilters,
     FlightSegment,
+    MaxStops,
     PassengerInfo,
 )
 from fli.models.google_flights.base import TripType
@@ -91,6 +92,20 @@ def test_multi_city_basic_economy_exclusion_uses_index_28():
 
     assert len(formatted[1]) == 29
     assert formatted[1][28] == 1
+
+
+def test_multi_city_encodes_per_leg_stops_and_airlines():
+    filters = multi_city_filters()
+    filters.flight_segments[0].stops = MaxStops.NON_STOP
+    filters.flight_segments[0].airlines = [Airline.UA]
+    filters.flight_segments[1].stops = MaxStops.ONE_STOP_OR_FEWER
+    filters.flight_segments[1].airlines = [Airline.DL]
+    formatted_segments = filters.format()[1][13]
+
+    assert formatted_segments[0][3] == MaxStops.NON_STOP.value
+    assert formatted_segments[0][4] == [Airline.UA.name]
+    assert formatted_segments[1][3] == MaxStops.ONE_STOP_OR_FEWER.value
+    assert formatted_segments[1][4] == [Airline.DL.name]
 
 
 def test_multi_city_rejects_non_contiguous_selected_prefix():
