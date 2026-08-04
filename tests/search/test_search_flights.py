@@ -253,9 +253,10 @@ class TestReturnCombinedOnly:
             outbound_flights
         )
         with client_patch, json_patch, parse_patch:
-            results = search.search(
-                round_trip_search_params, return_combined_only=True
-            )
+            with patch("fli.search.flights._is_itinerary_entry", return_value=True):
+                results = search.search(
+                    round_trip_search_params, return_combined_only=True
+                )
         assert results == outbound_flights
         # Flat list of outbounds, not (outbound, return) tuples.
         assert all(not isinstance(r, tuple) for r in results)
@@ -267,7 +268,8 @@ class TestReturnCombinedOnly:
             one_way_flights
         )
         with client_patch, json_patch, parse_patch:
-            results = search.search(basic_search_params, return_combined_only=True)
+            with patch("fli.search.flights._is_itinerary_entry", return_value=True):
+                results = search.search(basic_search_params, return_combined_only=True)
         assert results == one_way_flights
 
 
