@@ -74,6 +74,25 @@ def test_next_leg_only_does_not_recurse():
     post.assert_called_once()
 
 
+def test_multi_city_payload_matches_live_google_shape():
+    filters = multi_city_filters()
+    formatted = filters.format()
+
+    assert formatted[1][2] == TripType.MULTI_CITY.value
+    assert all(segment[14] == 1 for segment in formatted[1][13])
+    assert len(formatted[1]) == 18
+    assert formatted[2:] == [0, 0, 0, 1]
+
+
+def test_multi_city_basic_economy_exclusion_uses_index_28():
+    filters = multi_city_filters()
+    filters.exclude_basic_economy = True
+    formatted = filters.format()
+
+    assert len(formatted[1]) == 29
+    assert formatted[1][28] == 1
+
+
 def test_multi_city_rejects_non_contiguous_selected_prefix():
     filters = multi_city_filters()
     filters.flight_segments[1].selected_flight = result()
