@@ -415,9 +415,10 @@ class SearchFlights:
             Exception: If the search fails or returns invalid data
 
         Note:
-            Multi-city searches (TripType.MULTI_CITY) with distinct city pairs may
-            time out due to limitations of the Google Flights API endpoint.  The
-            endpoint reliably supports one-way and round-trip searches.
+            Multi-city searches are selection-driven. Pass ``next_leg_only=True``
+            to receive the current leg's candidates, then set ``selected_flight``
+            on the chosen segment before requesting the next leg. Google prices
+            those candidates as complete itineraries, not as isolated legs.
 
         """
         if filters.trip_type == TripType.MULTI_CITY:
