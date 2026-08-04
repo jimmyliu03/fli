@@ -174,7 +174,7 @@ def _leg_rejection_reason(leg: Any, index: int) -> str | None:
         isinstance(airline, list)
         and len(airline) > 1
         and isinstance(airline[0], str)
-        and isinstance(airline[1], (str, int))
+        and isinstance(airline[1], str | int)
     ):
         return f"leg[{index}] missing airline"
     return None
@@ -388,6 +388,7 @@ class SearchFlights:
         filters: FlightSearchFilters,
         top_n: int = 5,
         return_combined_only: bool = False,
+        next_leg_only: bool = False,
     ) -> list[FlightResult | tuple[FlightResult, ...]] | None:
         """Search for flights using the given FlightSearchFilters.
 
@@ -400,6 +401,10 @@ class SearchFlights:
                 ``price`` is Google's cheapest-combined round-trip price (matches the
                 Google Flights UI outbound list). Default False preserves the original
                 recursive behavior that yields ``(outbound, return)`` tuples.
+            next_leg_only: For round-trip or multi-city searches, return only the
+                candidates produced by this request. This is intended for interactive
+                step-by-step selection and avoids recursively expanding every possible
+                remaining itinerary combination. Defaults to False.
 
         Returns:
             List of FlightResult objects (one-way, or round-trip outbound list when
@@ -410,11 +415,29 @@ class SearchFlights:
             Exception: If the search fails or returns invalid data
 
         Note:
-            Multi-city searches (TripType.MULTI_CITY) with distinct city pairs may
-            time out due to limitations of the Google Flights API endpoint.  The
-            endpoint reliably supports one-way and round-trip searches.
+            Multi-city searches are selection-driven. Pass ``next_leg_only=True``
+            to receive the current leg's candidates, then set ``selected_flight``
+            on the chosen segment before requesting the next leg. Google prices
+            those candidates as complete itineraries, not as isolated legs.
 
         """
+        if filters.trip_type == TripType.MULTI_CITY:
+            segment_count = len(filters.flight_segments)
+            if not 2 <= segment_count <= 5:
+                raise ValueError("multi-city searches require between 2 and 5 segments")
+            travel_dates = [segment.travel_date for segment in filters.flight_segments]
+            if travel_dates != sorted(travel_dates):
+                raise ValueError("multi-city segment dates must be nondecreasing")
+
+        seen_unselected = False
+        for index, segment in enumerate(filters.flight_segments):
+            if segment.selected_flight is None:
+                seen_unselected = True
+            elif seen_unselected:
+                raise ValueError(
+                    f"selected flights must form a contiguous prefix (segment {index})"
+                )
+
         encoded_filters = filters.encode()
 
         try:
@@ -484,6 +507,9 @@ class SearchFlights:
                     )
 
             if filters.trip_type == TripType.ONE_WAY:
+                return flights
+
+            if next_leg_only:
                 return flights
 
             # For round-trip and multi-city, iteratively select each leg

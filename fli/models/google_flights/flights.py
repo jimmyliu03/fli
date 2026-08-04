@@ -101,10 +101,12 @@ class FlightSearchFilters(BaseModel):
             else:
                 time_filters = None
 
-            # Airlines
+            # Airlines. Multi-city callers may constrain each route
+            # independently; fall back to the legacy search-wide value.
             airlines_filters = None
-            if self.airlines:
-                sorted_airlines = sorted(self.airlines, key=lambda x: x.value)
+            segment_airlines = segment.airlines if segment.airlines is not None else self.airlines
+            if segment_airlines:
+                sorted_airlines = sorted(segment_airlines, key=lambda x: x.value)
                 airlines_filters = [serialize(airline) for airline in sorted_airlines]
 
             # Layover restrictions
@@ -142,7 +144,7 @@ class FlightSearchFilters(BaseModel):
                 segment_filters[0],  # departure airport
                 segment_filters[1],  # arrival airport
                 time_filters,  # time restrictions
-                serialize(self.stops.value),  # stops
+                serialize((segment.stops or self.stops).value),  # stops
                 airlines_filters,  # airlines
                 None,  # unknown: accepts [] but 400s on scalars; seemingly no effect
                 segment.travel_date,  # travel date
@@ -153,7 +155,10 @@ class FlightSearchFilters(BaseModel):
                 None,  # seemingly no effect: accepts any value (0-3, bool) without changing results
                 layover_duration,  # layover duration
                 emissions_filter,  # emissions filter: [1]=less emissions
-                3,  # seemingly no effect: accepts any value (0-5, None) without changing results
+                # Google emits 1 here for multi-city segments. Using the
+                # otherwise accepted value 3 makes GetShoppingResults hang
+                # instead of returning the first/next leg payload.
+                1 if self.trip_type == TripType.MULTI_CITY else 3,
             ]
             formatted_segments.append(segment_formatted)
 
@@ -187,9 +192,7 @@ class FlightSearchFilters(BaseModel):
         #   18-27: unknown - seemingly no effect
         #   28: exclude basic economy (0=allow, 1=exclude)
         #
-        filters = [
-            [],  # outer[0]
-            [
+        main_filters = [
                 None,  # [0] seemingly no effect
                 None,  # [1] seemingly no effect (not currency)
                 serialize(self.trip_type.value),
@@ -213,6 +216,13 @@ class FlightSearchFilters(BaseModel):
                 None,  # [15] seemingly no effect
                 None,  # [16] seemingly no effect
                 1,  # [17] seemingly no effect (hardcoded to 1)
+        ]
+        # The live multi-city UI truncates the main vector at index 17 unless
+        # Basic Economy exclusion is explicitly requested. Keeping the legacy
+        # trailing zero at index 28 causes multi-city shopping requests to
+        # stall. Other trip types retain the established flat payload.
+        if self.exclude_basic_economy or self.trip_type != TripType.MULTI_CITY:
+            main_filters.extend([
                 None,  # [18] seemingly no effect
                 None,  # [19] seemingly no effect
                 None,  # [20] seemingly no effect
@@ -224,9 +234,14 @@ class FlightSearchFilters(BaseModel):
                 None,  # [26] seemingly no effect
                 None,  # [27] seemingly no effect
                 1 if self.exclude_basic_economy else 0,
-            ],
-            serialize(self.sort_by.value),  # outer[2] sort mode
-            1 if self.show_all_results else 0,  # outer[3] 0=~30, 1=all results
+            ])
+
+        is_multi_city = self.trip_type == TripType.MULTI_CITY
+        filters = [
+            [],  # outer[0]
+            main_filters,
+            0 if is_multi_city else serialize(self.sort_by.value),  # outer[2]
+            0 if is_multi_city else (1 if self.show_all_results else 0),  # outer[3]
             0,  # outer[4] seemingly no effect
             1,  # outer[5] seemingly no effect
         ]

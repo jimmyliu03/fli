@@ -241,6 +241,8 @@ class FlightSegment(BaseModel):
     travel_date: str
     time_restrictions: TimeRestrictions | None = None
     selected_flight: FlightResult | None = None
+    stops: MaxStops | None = None
+    airlines: list[Airline] | None = None
 
     @property
     def parsed_travel_date(self) -> datetime:
