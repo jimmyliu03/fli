@@ -709,6 +709,14 @@ class TestTravelWarningHandling:
         with pytest.raises(ValueError, match="missing departure time"):
             SearchFlights._parse_flights_data(self._itinerary_entry_with_missing_datetime())
 
+    def test_parse_flights_data_preserves_selection_token(self):
+        entry = self._itinerary_entry()
+        entry[1][1] = "opaque-priced-itinerary-token"
+
+        parsed = SearchFlights._parse_flights_data(entry)
+
+        assert parsed.selection_token == "opaque-priced-itinerary-token"
+
     def test_parse_travel_warning_extracts_fields(self):
         from fli.search.flights import _parse_travel_warning
 

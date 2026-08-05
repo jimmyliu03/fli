@@ -19,7 +19,7 @@ from fli.models.google_flights.base import TripType
 from fli.search import SearchFlights
 
 
-def result(number: str = "123") -> FlightResult:
+def result(number: str = "123", selection_token: str | None = None) -> FlightResult:
     departure = datetime.now() + timedelta(days=30)
     return FlightResult(
         legs=[
@@ -37,6 +37,7 @@ def result(number: str = "123") -> FlightResult:
         currency="USD",
         duration=60,
         stops=0,
+        selection_token=selection_token,
     )
 
 
@@ -80,9 +81,29 @@ def test_multi_city_payload_matches_live_google_shape():
     formatted = filters.format()
 
     assert formatted[1][2] == TripType.MULTI_CITY.value
-    assert all(segment[14] == 1 for segment in formatted[1][13])
+    assert all(segment[14] == 3 for segment in formatted[1][13])
     assert len(formatted[1]) == 18
     assert formatted[2:] == [0, 0, 0, 1]
+
+
+def test_multi_city_payload_uses_live_kgmid_slot():
+    filters = multi_city_filters(2)
+    filters.flight_segments[0].arrival_airport = [["/m/07dfk", 5]]
+    filters.flight_segments[1].departure_airport = [["/m/0dqyw", 5]]
+
+    formatted_segments = filters.format()[1][13]
+
+    assert formatted_segments[0][1] == [[["/m/07dfk", 4]]]
+    assert formatted_segments[1][0] == [[["/m/0dqyw", 4]]]
+
+
+def test_multi_city_selected_row_token_is_sent_as_next_leg_context():
+    filters = multi_city_filters(2)
+    filters.flight_segments[0].selected_flight = result(
+        selection_token="opaque-priced-itinerary-token",
+    )
+
+    assert filters.format()[0] == [None, "opaque-priced-itinerary-token"]
 
 
 def test_multi_city_basic_economy_exclusion_uses_index_28():

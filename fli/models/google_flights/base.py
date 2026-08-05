@@ -170,6 +170,10 @@ class FlightResult(BaseModel):
     currency: str | None = None
     duration: PositiveInt  # total duration in minutes
     stops: NonNegativeInt
+    # Opaque token Google attaches to each priced itinerary row. The live
+    # multi-city shopping request sends the selected row's token back in the
+    # request wrapper when advancing to the next leg.
+    selection_token: str | None = Field(default=None, exclude=True, repr=False)
     raw_data: Any | None = Field(default=None, exclude=True, repr=False)
 
 
