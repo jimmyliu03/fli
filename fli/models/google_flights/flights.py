@@ -71,6 +71,9 @@ class FlightSearchFilters(BaseModel):
                 return serialize(obj.dict(exclude_none=True))
             return obj
 
+        is_multi_city = self.trip_type == TripType.MULTI_CITY
+        selected_context_token: str | None = None
+
         # Format flight segments
         formatted_segments = []
         for segment in self.flight_segments:
@@ -78,13 +81,27 @@ class FlightSearchFilters(BaseModel):
             segment_filters = [
                 [
                     [
-                        [serialize(airport[0]), serialize(airport[1])]
+                        [
+                            serialize(airport[0]),
+                            4 if (
+                                is_multi_city
+                                and isinstance(airport[0], str)
+                                and airport[0].startswith("/m/")
+                            ) else serialize(airport[1]),
+                        ]
                         for airport in segment.departure_airport
                     ]
                 ],
                 [
                     [
-                        [serialize(airport[0]), serialize(airport[1])]
+                        [
+                            serialize(airport[0]),
+                            4 if (
+                                is_multi_city
+                                and isinstance(airport[0], str)
+                                and airport[0].startswith("/m/")
+                            ) else serialize(airport[1]),
+                        ]
                         for airport in segment.arrival_airport
                     ]
                 ],
@@ -123,6 +140,11 @@ class FlightSearchFilters(BaseModel):
             selected_flights = None
             is_multi_leg = self.trip_type in (TripType.ROUND_TRIP, TripType.MULTI_CITY)
             if is_multi_leg and segment.selected_flight is not None:
+                if segment.selected_flight.selection_token:
+                    # Selected flights must be a contiguous prefix. The most
+                    # recently selected row carries Google's context for the
+                    # next unselected leg.
+                    selected_context_token = segment.selected_flight.selection_token
                 selected_flights = [
                     [
                         serialize(leg.departure_airport.name),
@@ -155,10 +177,7 @@ class FlightSearchFilters(BaseModel):
                 None,  # seemingly no effect: accepts any value (0-3, bool) without changing results
                 layover_duration,  # layover duration
                 emissions_filter,  # emissions filter: [1]=less emissions
-                # Google emits 1 here for multi-city segments. Using the
-                # otherwise accepted value 3 makes GetShoppingResults hang
-                # instead of returning the first/next leg payload.
-                1 if self.trip_type == TripType.MULTI_CITY else 3,
+                3,
             ]
             formatted_segments.append(segment_formatted)
 
@@ -236,9 +255,10 @@ class FlightSearchFilters(BaseModel):
                 1 if self.exclude_basic_economy else 0,
             ])
 
-        is_multi_city = self.trip_type == TripType.MULTI_CITY
         filters = [
-            [],  # outer[0]
+            [None, selected_context_token]
+            if is_multi_city and selected_context_token
+            else [],  # outer[0]: selected itinerary context for next leg
             main_filters,
             0 if is_multi_city else serialize(self.sort_by.value),  # outer[2]
             0 if is_multi_city else (1 if self.show_all_results else 0),  # outer[3]

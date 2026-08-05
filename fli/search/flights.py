@@ -704,6 +704,12 @@ class SearchFlights:
             raise ValueError(f"Invalid itinerary entry: {rejection_reason}")
 
         price, currency = SearchFlights._parse_price_info(data)
+        price_block = SearchFlights._get_price_block(data)
+        selection_token = (
+            price_block[1]
+            if price_block and len(price_block) > 1 and isinstance(price_block[1], str)
+            else None
+        )
         legs: list[FlightLeg] = []
         raw_legs = data[0][2]
         for index, fl in enumerate(raw_legs):
@@ -726,6 +732,7 @@ class SearchFlights:
             currency=currency,
             duration=data[0][9],
             stops=len(raw_legs) - 1,
+            selection_token=selection_token,
             raw_data=data,
             legs=legs,
         )
