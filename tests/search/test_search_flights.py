@@ -589,8 +589,14 @@ class TestTravelWarningHandling:
     @staticmethod
     def _itinerary_entry_with_missing_datetime() -> list:
         entry = TestTravelWarningHandling._itinerary_entry(price=600.0)
-        entry[0][2][0][8] = [None]
+        entry[0][2][0][8] = [None, None]
         entry[0][2][0][20] = [None, None, None]
+        return entry
+
+    @staticmethod
+    def _itinerary_entry_at_half_past_midnight() -> list:
+        entry = TestTravelWarningHandling._itinerary_entry(price=600.0)
+        entry[0][2][0][8] = [None, 30]
         return entry
 
     def _stub_search(self, encoded_payload: list) -> SearchFlights:
@@ -716,6 +722,13 @@ class TestTravelWarningHandling:
         parsed = SearchFlights._parse_flights_data(entry)
 
         assert parsed.selection_token == "opaque-priced-itinerary-token"
+
+    def test_parse_flights_data_treats_null_hour_as_midnight(self):
+        entry = self._itinerary_entry_at_half_past_midnight()
+
+        parsed = SearchFlights._parse_flights_data(entry)
+
+        assert parsed.legs[0].departure_datetime == datetime(2026, 6, 12, 0, 30)
 
     def test_parse_travel_warning_extracts_fields(self):
         from fli.search.flights import _parse_travel_warning

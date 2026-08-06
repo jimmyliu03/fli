@@ -147,7 +147,18 @@ def _is_date_array(value: Any) -> bool:
 
 
 def _is_time_array(value: Any) -> bool:
-    return isinstance(value, list) and len(value) >= 1 and isinstance(value[0], int)
+    """Recognize Google's compact time arrays, including midnight.
+
+    Google serializes a zero hour as ``null`` (for example ``[null, 30]``
+    means 12:30 AM) and omits a zero minute. Other null components remain
+    invalid so incomplete metadata rows are not promoted to itineraries.
+    """
+    return (
+        isinstance(value, list)
+        and len(value) >= 1
+        and (isinstance(value[0], int) or value[0] is None)
+        and (len(value) == 1 or isinstance(value[1], int))
+    )
 
 
 def _leg_rejection_reason(leg: Any, index: int) -> str | None:
@@ -811,7 +822,7 @@ class SearchFlights:
         return None
 
     @staticmethod
-    def _parse_datetime(date_arr: list[int], time_arr: list[int]) -> datetime:
+    def _parse_datetime(date_arr: list[int], time_arr: list[int | None]) -> datetime:
         """Convert date and time arrays to datetime.
 
         Args:
@@ -822,11 +833,11 @@ class SearchFlights:
             Parsed datetime object
 
         Raises:
-            ValueError: If arrays contain only None values
+            ValueError: If arrays do not use a valid Google date/time shape
 
         """
-        if not any(x is not None for x in date_arr) or not any(x is not None for x in time_arr):
-            raise ValueError("Date and time arrays must contain at least one non-None value")
+        if not any(x is not None for x in date_arr) or not _is_time_array(time_arr):
+            raise ValueError("Date and time arrays must use valid Google response shapes")
 
         return datetime(*(x or 0 for x in date_arr), *(x or 0 for x in time_arr))
 
