@@ -88,13 +88,15 @@ def test_multi_city_payload_matches_live_google_shape():
 
 def test_multi_city_payload_uses_live_kgmid_slot():
     filters = multi_city_filters(2)
+    filters.flight_segments[0].departure_airport = [["/m/0d6lp", 5]]
     filters.flight_segments[0].arrival_airport = [["/m/07dfk", 5]]
     filters.flight_segments[1].departure_airport = [["/m/0dqyw", 5]]
 
     formatted_segments = filters.format()[1][13]
 
-    assert formatted_segments[0][1] == [[["/m/07dfk", 4]]]
-    assert formatted_segments[1][0] == [[["/m/0dqyw", 4]]]
+    assert formatted_segments[0][0] == [[["/m/0d6lp", 4]]]
+    assert formatted_segments[0][1] == [[["/m/07dfk", 5]]]
+    assert formatted_segments[1][0] == [[["/m/0dqyw", 5]]]
 
 
 def test_multi_city_selected_row_token_is_sent_as_next_leg_context():
