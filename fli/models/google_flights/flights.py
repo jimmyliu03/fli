@@ -72,17 +72,23 @@ class FlightSearchFilters(BaseModel):
             return obj
 
         is_multi_city = self.trip_type == TripType.MULTI_CITY
+        has_selected_prefix = is_multi_city and any(
+            segment.selected_flight is not None for segment in self.flight_segments
+        )
         selected_context_token: str | None = None
 
         def location_slot(code, supplied_slot, *, segment_index, is_departure):
             """Match Google's current multi-city kgmid discriminator.
 
-            The first itinerary origin uses slot 4. Every later city
-            endpoint—including the first destination—uses slot 5.
-            Airport IATA codes retain the caller-supplied slot.
+            The initial request uses slot 4 for the first itinerary origin and
+            slot 5 for later city endpoints. Once a flight is selected,
+            Google's continuation request switches every city endpoint to
+            slot 4. Airport IATA codes retain the caller-supplied slot.
             """
             if not (is_multi_city and isinstance(code, str) and code.startswith("/m/")):
                 return serialize(supplied_slot)
+            if has_selected_prefix:
+                return 4
             return 4 if segment_index == 0 and is_departure else 5
 
         # Format flight segments
