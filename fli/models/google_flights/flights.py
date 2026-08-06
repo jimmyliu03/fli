@@ -74,20 +74,32 @@ class FlightSearchFilters(BaseModel):
         is_multi_city = self.trip_type == TripType.MULTI_CITY
         selected_context_token: str | None = None
 
+        def location_slot(code, supplied_slot, *, segment_index, is_departure):
+            """Match Google's current multi-city kgmid discriminator.
+
+            The first itinerary origin uses slot 4. Every later city
+            endpoint—including the first destination—uses slot 5.
+            Airport IATA codes retain the caller-supplied slot.
+            """
+            if not (is_multi_city and isinstance(code, str) and code.startswith("/m/")):
+                return serialize(supplied_slot)
+            return 4 if segment_index == 0 and is_departure else 5
+
         # Format flight segments
         formatted_segments = []
-        for segment in self.flight_segments:
+        for segment_index, segment in enumerate(self.flight_segments):
             # Format airport codes with correct nesting
             segment_filters = [
                 [
                     [
                         [
                             serialize(airport[0]),
-                            4 if (
-                                is_multi_city
-                                and isinstance(airport[0], str)
-                                and airport[0].startswith("/m/")
-                            ) else serialize(airport[1]),
+                            location_slot(
+                                airport[0],
+                                airport[1],
+                                segment_index=segment_index,
+                                is_departure=True,
+                            ),
                         ]
                         for airport in segment.departure_airport
                     ]
@@ -96,11 +108,12 @@ class FlightSearchFilters(BaseModel):
                     [
                         [
                             serialize(airport[0]),
-                            4 if (
-                                is_multi_city
-                                and isinstance(airport[0], str)
-                                and airport[0].startswith("/m/")
-                            ) else serialize(airport[1]),
+                            location_slot(
+                                airport[0],
+                                airport[1],
+                                segment_index=segment_index,
+                                is_departure=False,
+                            ),
                         ]
                         for airport in segment.arrival_airport
                     ]
